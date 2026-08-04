@@ -3,6 +3,10 @@ import logging.handlers
 import os
 import sys
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 API_KEY = os.environ.get("BINANCE_API_KEY", "")
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 

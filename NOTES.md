@@ -18,7 +18,7 @@ Automatisierter Krypto-Spot-Trading-Bot für Binance. Scannt stündlich fünf Sy
 | `notify.py` | Telegram-Benachrichtigungen |
 | `sentiment.py` | Fear & Greed Index + News-Sentiment via Claude Haiku (RSS → Anthropic API) |
 | `backtest.py` | Historisches Backtesting mit Equity-Kurve und Drawdown-Reporting |
-| `set_token.py` | Einmal-Hilfsskript: schreibt `TELEGRAM_TOKEN` in `~/.zshrc` |
+| `ingestion/` | Ingestion-Schicht: `MarketDataSource`-Abstraktion, `BinanceSource`, `RawStore` (Parquet, idempotent) |
 
 ## Strategie
 
@@ -34,7 +34,7 @@ Automatisierter Krypto-Spot-Trading-Bot für Binance. Scannt stündlich fünf Sy
 
 ## Secrets / Umgebungsvariablen
 
-Alle Credentials kommen aus der Shell-Umgebung — keine hardcodierten Werte im Code.
+Alle Credentials kommen aus einer lokalen `.env`-Datei (via `python-dotenv`, geladen in `config.py`) — keine hardcodierten Werte im Code. Vorlage: `.env.example` nach `.env` kopieren und ausfüllen; `.env` ist gitignored.
 
 | Variable | Verwendung |
 |---|---|
@@ -46,11 +46,15 @@ Alle Credentials kommen aus der Shell-Umgebung — keine hardcodierten Werte im 
 
 ## Abhängigkeiten (venv)
 
+Siehe `requirements.txt`. Installation: `pip install -r requirements.txt`.
+
 - `python-binance` — Binance-Client
 - `pandas`, `numpy` — Datenverarbeitung
+- `pyarrow` — Parquet-I/O für den Raw Layer (`ingestion/`)
 - `anthropic` — Claude API
 - `apscheduler` — Cron-Scheduler
 - `requests` — HTTP (Telegram, RSS, Fear & Greed)
+- `python-dotenv` — lädt `.env` in `config.py`
 
 ## Datenbank
 

@@ -10,7 +10,7 @@ venv/
 *.db
 *.db-shm
 *.db-wal
-data/raw/
+data/
 
 # Environment / secrets
 .env

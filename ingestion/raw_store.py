@@ -26,6 +26,18 @@ class RawStore:
         self.base_dir = Path(base_dir)
 
     def write(self, df: pd.DataFrame, asset_class: str) -> None:
+        for path, group in self._partitions(df, asset_class):
+            self._write_partition(path, group)
+
+    def preview(self, df: pd.DataFrame, asset_class: str) -> list[tuple[Path, int]]:
+        """Return (partition_path, incoming_row_count) pairs without writing.
+
+        Used for --dry-run: shows what write() would touch and how many
+        rows it would add, without merging into or touching disk state.
+        """
+        return [(path, len(group)) for path, group in self._partitions(df, asset_class)]
+
+    def _partitions(self, df: pd.DataFrame, asset_class: str):
         if df.empty:
             return
 
@@ -36,7 +48,7 @@ class RawStore:
             ["source", "symbol", "interval", "_date"], sort=True
         ):
             path = self._partition_path(asset_class, source, symbol, interval, date)
-            self._write_partition(path, group.drop(columns="_date"))
+            yield path, group.drop(columns="_date")
 
     def _partition_path(
         self, asset_class: str, source: str, symbol: str, interval: str, date: str

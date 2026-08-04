@@ -72,3 +72,41 @@ python bot.py
 source venv/bin/activate
 python backtest.py --days 365 --symbols BTCUSDT ETHUSDT
 ```
+
+## Tests
+
+Die Test-Suite deckt alle Indikator-Funktionen und die Strategie-Logik in `bot.py` ab. Keine echten API-Calls — alles läuft gegen synthetische DataFrames.
+
+**Dev-Abhängigkeiten installieren:**
+
+```bash
+source venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+**Tests ausführen:**
+
+```bash
+python -m pytest tests/ -v
+```
+
+**Mit Coverage-Report:**
+
+```bash
+python -m pytest tests/ --cov=bot --cov-report=term-missing
+```
+
+**Was getestet wird (`tests/test_bot.py`, 59 Tests):**
+
+| Klasse | Funktion | Abgedeckte Fälle |
+|---|---|---|
+| `TestCalculateRsi` | `calculate_rsi` | Nur-Gewinne → 100, Nur-Verluste → 0, alternierend ~50, zu wenig Daten → NaN, Länge, Wertebereich |
+| `TestCalculateMacd` | `calculate_macd` | Struktur (3 Series), hist = macd − signal, steigende/fallende Preise, flacher Markt |
+| `TestCalculateAtr` | `calculate_atr` | Bekannte Werte, period=1 = True Range, Länge, zu wenig Daten → NaN |
+| `TestAddIndicators` | `add_indicators` | Alle Spalten vorhanden, Original nicht mutiert, EMA NaN-frei, EMA20 > EMA50 im Auftrend |
+| `TestGetTrend4h` | `get_trend_4h` | BULLISH/BEARISH/NEUTRAL, NaN → NEUTRAL, gemischte Signale → NEUTRAL |
+| `TestGenerateEntrySignal` | `generate_entry_signal` | BUY/SELL/HOLD, falsche Trendrichtung, zu wenig Daten (NaN), Volumen zu tief, RSI-Grenzen, Preis zu weit von EMA20 |
+| `TestCreateTradePlan` | `create_trade_plan` | BUY/SELL-Level (SL/TP/RR), HOLD → `{}`, NaN entry/ATR → `{}` |
+| `TestIsTradeWorthIt` | `is_trade_worth_it` | R/R über/unter/gleich Minimum, leerer Plan, custom `min_rr` |
+| `TestCalculatePositionSize` | `calculate_position_size` | Bekannte Werte, zero risk → 0, proportional zu risk% und Accountgrösse |
+| `TestCalculateScore` | `calculate_score` | Finiter Float, NaN → Sentinel −999, breiterer EMA-Spread = höherer Score, hohe Volatilität = tieferer Score |

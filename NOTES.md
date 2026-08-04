@@ -1,0 +1,74 @@
+# Trading Bot — Bestandsaufnahme
+
+Stand: 2026-08-04
+
+## Zweck
+
+Automatisierter Krypto-Spot-Trading-Bot für Binance. Scannt stündlich fünf Symbole, generiert Signale auf Basis technischer Indikatoren und Sentiment-Daten, öffnet und verwaltet Trades vollständig automatisch inklusive OCO-Orders (Take Profit / Stop Loss).
+
+## Dateien
+
+| Datei | Funktion |
+|---|---|
+| `bot.py` | Hauptlogik: Indikatoren, Strategie, Scanner, APScheduler-Loop |
+| `config.py` | Konfiguration; alle Secrets kommen aus Umgebungsvariablen |
+| `exchange.py` | Binance-Client-Wrapper (Daten holen, Orders platzieren, Lot/Tick-Rounding) |
+| `trader.py` | Trade-Lifecycle: öffnen, OCO platzieren, Notfall-Close, sync |
+| `database.py` | SQLite-Layer (Tabellen `signals` + `trades`) |
+| `notify.py` | Telegram-Benachrichtigungen |
+| `sentiment.py` | Fear & Greed Index + News-Sentiment via Claude Haiku (RSS → Anthropic API) |
+| `backtest.py` | Historisches Backtesting mit Equity-Kurve und Drawdown-Reporting |
+| `set_token.py` | Einmal-Hilfsskript: schreibt `TELEGRAM_TOKEN` in `~/.zshrc` |
+
+## Strategie
+
+- **Universum:** BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, ADAUSDT
+- **Timeframes:** 4h (Trendfilter) + 1h (Einstieg)
+- **Indikatoren:** EMA 20/50, RSI 14, MACD (12/26/9), ATR 14, Volume-MA 20
+- **Trendfilter (4h):** EMA20 > EMA50, Preis über EMA20, MACD > Signal → BULLISH (analog BEARISH)
+- **Einstiegssignal (1h):** Trend bestätigt, Preis nahe EMA20 (±3 %), RSI im erlaubten Band, Volumen über MA
+- **Trade-Plan:** SL = 1.5 × ATR, TP = 3.0 × ATR → R/R ≥ 2.0 erforderlich
+- **Positionsgrösse:** 1 % Risiko pro Trade auf Accountgrösse (default 1 000 USD)
+- **Sentiment-Filter:** Fear & Greed Index (BUY blockiert bei < 25, SELL bei > 75) + Claude-Newsanalyse (blockiert bei Score < −0.5 bzw. > 0.5)
+- **Risiko-Controls:** Max. 3 gleichzeitige Positionen; Tages-Verlust-Limit −3 % (Circuit Breaker)
+
+## Secrets / Umgebungsvariablen
+
+Alle Credentials kommen aus der Shell-Umgebung — keine hardcodierten Werte im Code.
+
+| Variable | Verwendung |
+|---|---|
+| `BINANCE_API_KEY` | Binance REST API |
+| `BINANCE_API_SECRET` | Binance REST API |
+| `TELEGRAM_TOKEN` | Telegram Bot |
+| `TELEGRAM_CHAT_ID` | Telegram Ziel-Chat |
+| `ANTHROPIC_API_KEY` | Claude Haiku (Sentiment) |
+
+## Abhängigkeiten (venv)
+
+- `python-binance` — Binance-Client
+- `pandas`, `numpy` — Datenverarbeitung
+- `anthropic` — Claude API
+- `apscheduler` — Cron-Scheduler
+- `requests` — HTTP (Telegram, RSS, Fear & Greed)
+
+## Datenbank
+
+SQLite-Datei `trading_bot.db` (zur Laufzeit erstellt, nicht im Repo).
+
+- Tabelle `signals`: alle generierten Signale mit Scores und Indikatorwerten
+- Tabelle `trades`: vollständiger Trade-Lifecycle (open/closed, PnL, Order-IDs)
+
+## Bot starten
+
+```bash
+source venv/bin/activate
+python bot.py
+```
+
+## Backtest
+
+```bash
+source venv/bin/activate
+python backtest.py --days 365 --symbols BTCUSDT ETHUSDT
+```

@@ -20,9 +20,9 @@ from bot import (
     is_trade_worth_it,
     calculate_position_size,
 )
-from config import SYMBOLS, ACCOUNT_SIZE, RISK_PER_TRADE
+from config import SYMBOLS, ACCOUNT_SIZE, RISK_PER_TRADE, setup_logging
 
-logging.basicConfig(level=logging.WARNING)
+log = logging.getLogger(__name__)
 
 WARMUP = 100  # skip first N candles while indicators stabilise
 FEE_RATE = 0.001  # 0.1% per side — Binance standard spot taker fee
@@ -155,14 +155,15 @@ def run_backtest(symbol: str, df_4h, df_1h) -> list[dict]:
 # Reporting
 # ---------------------------------------------------------------------------
 
-def print_report(label: str, trades: list[dict], account: float) -> None:
+def log_report(label: str, trades: list[dict], account: float) -> None:
     closed = [t for t in trades if t.get("pnl") is not None]
-    print(f"\n{'=' * 52}")
-    print(f"  {label}")
-    print(f"{'=' * 52}")
+    sep = "=" * 52
+    log.info(sep)
+    log.info("  %s", label)
+    log.info(sep)
 
     if not closed:
-        print("  No closed trades.")
+        log.warning("  No closed trades.")
         return
 
     pnls = [t["pnl"] for t in closed]
@@ -204,18 +205,18 @@ def print_report(label: str, trades: list[dict], account: float) -> None:
     tp_count = sum(1 for t in closed if t["exit_reason"] == "TP")
     total_fees = sum(t.get("fee", 0) for t in closed)
 
-    print(f"  Trades:              {len(closed)}")
-    print(f"  Win rate:            {win_rate:.1f}%   ({len(wins)}W / {len(losses)}L)")
-    print(f"  TP hits / SL hits:   {tp_count} / {sl_count}")
-    print(f"  Profit factor:       {profit_factor:.2f}")
-    print(f"  Avg win:             ${avg_win:+.2f}")
-    print(f"  Avg loss:            ${avg_loss:+.2f}")
-    print(f"  Total fees paid:     ${total_fees:.2f}")
-    print(f"  Total PnL (net):     ${total_pnl:+.2f}")
-    print(f"  Return on account:   {total_pnl / account * 100:+.1f}%")
-    print(f"  Max drawdown:        {max_dd_pct:.1f}%")
-    print(f"  Max consec. losses:  {max_consec_losses}")
-    print(f"  Final equity:        ${equity_curve[-1]:.2f}")
+    log.info("  Trades:              %d", len(closed))
+    log.info("  Win rate:            %.1f%%   (%dW / %dL)", win_rate, len(wins), len(losses))
+    log.info("  TP hits / SL hits:   %d / %d", tp_count, sl_count)
+    log.info("  Profit factor:       %.2f", profit_factor)
+    log.info("  Avg win:             $%+.2f", avg_win)
+    log.info("  Avg loss:            $%+.2f", avg_loss)
+    log.info("  Total fees paid:     $%.2f", total_fees)
+    log.info("  Total PnL (net):     $%+.2f", total_pnl)
+    log.info("  Return on account:   %+.1f%%", total_pnl / account * 100)
+    log.info("  Max drawdown:        %.1f%%", max_dd_pct)
+    log.info("  Max consec. losses:  %d", max_consec_losses)
+    log.info("  Final equity:        $%.2f", equity_curve[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -226,24 +227,25 @@ def main(symbols: list[str], days: int) -> None:
     all_trades: list[dict] = []
 
     for symbol in symbols:
-        print(f"Fetching {symbol} ({days}d of 1h + 4h)...", end=" ", flush=True)
         try:
             df_4h = fetch_history(symbol, "4h", days + 30)   # extra buffer for 4h warmup
             df_1h = fetch_history(symbol, "1h", days)
-            print(f"{len(df_1h)} candles")
+            log.info("Fetched %s — %d 1h candles  (%dd window)", symbol, len(df_1h), days)
         except Exception as exc:
-            print(f"FAILED — {exc}")
+            log.error("Fetch failed for %s — %s", symbol, exc)
             continue
 
         trades = run_backtest(symbol, df_4h, df_1h)
-        print_report(symbol, trades, ACCOUNT_SIZE)
+        log_report(symbol, trades, ACCOUNT_SIZE)
         all_trades.extend(trades)
 
     if len(symbols) > 1:
-        print_report("ALL SYMBOLS COMBINED", all_trades, ACCOUNT_SIZE)
+        log_report("ALL SYMBOLS COMBINED", all_trades, ACCOUNT_SIZE)
 
 
 if __name__ == "__main__":
+    setup_logging()
+
     parser = argparse.ArgumentParser(description="Backtest the trading strategy")
     parser.add_argument("--days", type=int, default=365, help="How many days to backtest")
     parser.add_argument("--symbols", nargs="+", default=SYMBOLS, help="Symbols to test")

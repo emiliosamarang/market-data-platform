@@ -10,13 +10,9 @@ import sentiment
 from config import (
     SYMBOLS, HIGHER_INTERVAL, LOWER_INTERVAL, KLINE_LIMIT,
     ACCOUNT_SIZE, RISK_PER_TRADE, MIN_RR, DAILY_LOSS_LIMIT,
+    setup_logging,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 
@@ -319,6 +315,7 @@ def scan() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    setup_logging()
     database.init_db()
 
     scheduler = BlockingScheduler(timezone="UTC")

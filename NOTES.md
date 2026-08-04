@@ -17,7 +17,7 @@ Automatisierter Krypto-Spot-Trading-Bot für Binance. Scannt stündlich fünf Sy
 | `database.py` | SQLite-Layer (Tabellen `signals` + `trades`) |
 | `notify.py` | Telegram-Benachrichtigungen |
 | `sentiment.py` | Fear & Greed Index + News-Sentiment via Claude Haiku (RSS → Anthropic API) |
-| `backtest.py` | Historisches Backtesting mit Equity-Kurve und Drawdown-Reporting |
+| `backtest.py` | Historisches Backtesting mit Equity-Kurve und Drawdown-Reporting; liest über `RawStore` aus dem Raw Layer, `--refresh` lädt fehlende Daten via Ingestion nach |
 | `ingestion/` | Ingestion-Schicht: `MarketDataSource`-Abstraktion, `BinanceSource`, `RawStore` (Parquet, idempotent) |
 
 ## Strategie
@@ -75,7 +75,10 @@ python bot.py
 ```bash
 source venv/bin/activate
 python backtest.py --days 365 --symbols BTCUSDT ETHUSDT
+python backtest.py --refresh   # fehlende Raw-Daten vorher via Ingestion nachladen
 ```
+
+Liest aus `data/raw/` (via `RawStore.read()`), nicht mehr live von Binance. Fehlt Datenmaterial für den angeforderten Zeitraum, bricht der Lauf mit klarer Fehlermeldung ab, außer `--refresh` ist gesetzt.
 
 ## Tests
 

@@ -22,8 +22,8 @@ flowchart LR
     end
 
     subgraph Research["Research"]
-        BACKTEST["backtest.py\nhistorical simulation"] --> EX
-        BACKTEST -.future.-> PARQUET
+        BACKTEST["backtest.py\nhistorical simulation"] --> RAW
+        BACKTEST -.--refresh.-> BSRC
     end
 
     CONFIG["config.py\n.env via python-dotenv"] -.-> BOT
@@ -43,7 +43,7 @@ flowchart LR
 | `database.py` | SQLite persistence for generated signals and the full trade lifecycle |
 | `notify.py` | Telegram push notifications for trade events and circuit breakers |
 | `sentiment.py` | Fear & Greed Index + Claude-Haiku-based news sentiment, used as a trade filter |
-| `backtest.py` | Historical strategy simulation with equity curve, drawdown, and fee accounting |
+| `backtest.py` | Historical strategy simulation with equity curve, drawdown, and fee accounting. Reads from the raw layer via `RawStore.read()`, not live from Binance — `--refresh` backfills gaps through `ingestion/` first |
 | `ingestion/` | Source-agnostic data ingestion layer (see below) — decoupled from the live trading path |
 
 **`ingestion/` in detail:**
@@ -106,9 +106,10 @@ All tests run against synthetic data or mocked clients (`unittest.mock`) — no 
 python backtest.py                          # 365 days, all symbols from config.py
 python backtest.py --days 730                # 2 years
 python backtest.py --symbols BTCUSDT ETHUSDT  # subset of symbols
+python backtest.py --refresh                 # backfill missing raw data first
 ```
 
-Reports per-symbol and combined win rate, profit factor, fees, drawdown, and final equity based on historical Binance klines fetched live at run time.
+Reports per-symbol and combined win rate, profit factor, fees, drawdown, and final equity. Data is read from the raw Parquet layer (`data/raw/`, populated via `ingestion/`) rather than fetched live from Binance. If the raw layer doesn't fully cover the requested range, the run fails with a clear error naming the missing candles — pass `--refresh` to backfill the gap through `ingestion` before backtesting.
 
 ## Results and findings
 
@@ -125,7 +126,7 @@ This is exactly why the current priority is the `ingestion/` raw-data layer rath
 
 ## Roadmap
 
-- **Backfill** — bulk-load full symbol/interval history through `ingestion/` into the Parquet raw layer, so backtests run against a fixed dataset instead of live API pulls
+- **Backfill** — proactively bulk-load full symbol/interval history through `ingestion/` (rather than relying on ad-hoc `--refresh` calls) so the raw layer is complete before any backtest run
 - **Data quality checks** — gap detection, duplicate/monotonicity checks, and schema validation on raw partitions before they're used downstream
 - **Second data source** — add another `MarketDataSource` implementation (e.g. a different exchange) to cross-validate prices and reduce single-source risk
 - **Azure migration** — move raw storage from local Parquet to Azure (Blob Storage / Data Lake), enabling shared access and scheduled ingestion jobs

@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-Backtest the trading strategy on Binance historical data.
+Backtest the trading strategy on historical data from the raw Parquet layer.
 
 Usage:
     python backtest.py                          # 1 year, all symbols from config
     python backtest.py --days 730               # 2 years
     python backtest.py --symbols BTCUSDT ETHUSDT
+    python backtest.py --refresh                # backfill missing raw data first
+
+Data is read via RawStore from data/raw/ (see ingestion/), not fetched live
+from Binance. If the raw layer doesn't fully cover the requested range, the
+run fails with a clear error unless --refresh is passed, in which case the
+missing range is backfilled through the ingestion layer before backtesting.
 """
 import argparse
 import logging
 from datetime import datetime, timedelta, timezone
 
-import exchange
+import pandas as pd
+
 from bot import (
     add_indicators,
     get_trend_4h,
@@ -20,38 +27,60 @@ from bot import (
     is_trade_worth_it,
     calculate_position_size,
 )
-from config import SYMBOLS, ACCOUNT_SIZE, RISK_PER_TRADE, setup_logging
+from config import (
+    SYMBOLS, ACCOUNT_SIZE, RISK_PER_TRADE,
+    INGESTION_ASSET_CLASS, INGESTION_SOURCE, RAW_DATA_DIR,
+    setup_logging,
+)
+from ingestion.base import MarketDataSource
+from ingestion.binance_source import BinanceSource
+from ingestion.raw_store import MissingDataError, RawStore
 
 log = logging.getLogger(__name__)
 
 WARMUP = 100  # skip first N candles while indicators stabilise
 FEE_RATE = 0.001  # 0.1% per side — Binance standard spot taker fee
 
+# bot.py's indicator/strategy functions expect capitalized OHLCV columns on
+# a DatetimeIndex named "timestamp" — the shape exchange.get_data() used to
+# produce. The ingestion layer's schema is lowercase columns + a plain
+# "timestamp" column, so results are reshaped after reading.
+_RENAME_COLS = {"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
+
 
 # ---------------------------------------------------------------------------
-# Data fetching
+# Data loading
 # ---------------------------------------------------------------------------
 
-def fetch_history(symbol: str, interval: str, days: int):
-    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d %b %Y")
-    raw = exchange.client.get_historical_klines(symbol, interval, start)
-    if not raw:
-        raise ValueError(f"No data returned for {symbol} {interval}")
+def load_history(
+    symbol: str,
+    interval: str,
+    start: datetime,
+    end: datetime,
+    store: RawStore,
+    refresh: bool,
+    source: MarketDataSource | None = None,
+) -> pd.DataFrame:
+    """Read OHLCV history for symbol/interval from the raw layer.
 
-    import pandas as pd
-    cols = [
-        "open_time", "Open", "High", "Low", "Close", "Volume",
-        "close_time", "quote_volume", "trades",
-        "taker_buy_base", "taker_buy_quote", "ignore",
-    ]
-    df = pd.DataFrame(raw, columns=cols)
-    df = df[["open_time", "Open", "High", "Low", "Close", "Volume"]].copy()
-    df[["Open", "High", "Low", "Close", "Volume"]] = df[
-        ["Open", "High", "Low", "Close", "Volume"]
-    ].astype(float)
-    df.index = __import__("pandas").to_datetime(df["open_time"], unit="ms", utc=True)
-    df.index.name = "timestamp"
-    return df.drop(columns="open_time").dropna()
+    Raises MissingDataError if the raw layer doesn't fully cover the range
+    and refresh=False. With refresh=True, missing data is backfilled via
+    `source` (a MarketDataSource) before re-reading.
+    """
+    try:
+        df = store.read(INGESTION_ASSET_CLASS, INGESTION_SOURCE, symbol, interval, start, end)
+    except MissingDataError:
+        if not refresh:
+            raise
+        log.info("%s %s | raw data incomplete, backfilling via ingestion...", symbol, interval)
+        source = source if source is not None else BinanceSource()
+        fetched = source.fetch_ohlcv(symbol, interval, start, end)
+        store.write(fetched, INGESTION_ASSET_CLASS)
+        df = store.read(INGESTION_ASSET_CLASS, INGESTION_SOURCE, symbol, interval, start, end)
+
+    result = df.set_index("timestamp")[list(_RENAME_COLS)].rename(columns=_RENAME_COLS)
+    result.index.name = "timestamp"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -223,16 +252,22 @@ def log_report(label: str, trades: list[dict], account: float) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main(symbols: list[str], days: int) -> None:
+def main(symbols: list[str], days: int, refresh: bool) -> None:
     all_trades: list[dict] = []
+    store = RawStore(base_dir=RAW_DATA_DIR)
+    source = BinanceSource() if refresh else None
+    end = datetime.now(timezone.utc)
 
     for symbol in symbols:
         try:
-            df_4h = fetch_history(symbol, "4h", days + 30)   # extra buffer for 4h warmup
-            df_1h = fetch_history(symbol, "1h", days)
-            log.info("Fetched %s — %d 1h candles  (%dd window)", symbol, len(df_1h), days)
+            df_4h = load_history(symbol, "4h", end - timedelta(days=days + 30), end, store, refresh, source)
+            df_1h = load_history(symbol, "1h", end - timedelta(days=days), end, store, refresh, source)
+            log.info("Loaded %s — %d 1h candles  (%dd window)", symbol, len(df_1h), days)
+        except MissingDataError as exc:
+            log.error("%s", exc)
+            continue
         except Exception as exc:
-            log.error("Fetch failed for %s — %s", symbol, exc)
+            log.error("Load failed for %s — %s", symbol, exc)
             continue
 
         trades = run_backtest(symbol, df_4h, df_1h)
@@ -249,5 +284,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backtest the trading strategy")
     parser.add_argument("--days", type=int, default=365, help="How many days to backtest")
     parser.add_argument("--symbols", nargs="+", default=SYMBOLS, help="Symbols to test")
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="Backfill missing raw data via ingestion before backtesting",
+    )
     args = parser.parse_args()
-    main(args.symbols, args.days)
+    main(args.symbols, args.days, args.refresh)

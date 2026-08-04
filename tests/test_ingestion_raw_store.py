@@ -1,10 +1,11 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from ingestion.base import OHLCV_COLUMNS
-from ingestion.raw_store import RawStore
+from ingestion.raw_store import MissingDataError, RawStore
 
 
 def _rows(timestamps, symbol="BTCUSDT", interval="1h", source="binance", price=100.0):
@@ -138,3 +139,155 @@ class TestIdempotency:
         result = pd.read_parquet(path)
         assert len(result) == 1
         assert result["open"].iloc[0] == 200.0
+
+
+class TestRead:
+    def test_reads_full_range_from_single_partition(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z", "2024-01-01T02:00:00Z"]),
+            asset_class="crypto",
+        )
+
+        result = store.read(
+            "crypto", "binance", "BTCUSDT", "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        )
+
+        assert len(result) == 3
+        assert list(result.columns) == OHLCV_COLUMNS
+        assert result["timestamp"].is_monotonic_increasing
+
+    def test_reads_across_multiple_day_partitions(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(_rows(["2024-01-01T23:00:00Z"]), asset_class="crypto")
+        store.write(_rows(["2024-01-02T00:00:00Z", "2024-01-02T01:00:00Z"]), asset_class="crypto")
+
+        result = store.read(
+            "crypto", "binance", "BTCUSDT", "1h",
+            datetime(2024, 1, 1, 23, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, 1, tzinfo=timezone.utc),
+        )
+
+        assert len(result) == 3
+        assert result["timestamp"].is_monotonic_increasing
+
+    def test_excludes_data_outside_requested_range(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows([
+                "2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z",
+                "2024-01-01T02:00:00Z", "2024-01-01T03:00:00Z",
+            ]),
+            asset_class="crypto",
+        )
+
+        result = store.read(
+            "crypto", "binance", "BTCUSDT", "1h",
+            datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        )
+
+        assert len(result) == 2
+        assert result["timestamp"].min() == pd.Timestamp("2024-01-01T01:00:00Z")
+        assert result["timestamp"].max() == pd.Timestamp("2024-01-01T02:00:00Z")
+
+    def test_missing_partition_raises(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+
+        with pytest.raises(MissingDataError):
+            store.read(
+                "crypto", "binance", "BTCUSDT", "1h",
+                datetime(2024, 1, 1, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            )
+
+    def test_gap_within_existing_partition_raises(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        # hour 01:00 is missing between 00:00 and 02:00.
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"]),
+            asset_class="crypto",
+        )
+
+        with pytest.raises(MissingDataError):
+            store.read(
+                "crypto", "binance", "BTCUSDT", "1h",
+                datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            )
+
+    def test_error_message_names_missing_timestamp_and_hints_refresh(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"]),
+            asset_class="crypto",
+        )
+
+        with pytest.raises(MissingDataError) as excinfo:
+            store.read(
+                "crypto", "binance", "BTCUSDT", "1h",
+                datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            )
+
+        message = str(excinfo.value)
+        assert "BTCUSDT" in message
+        assert "1h" in message
+        assert "2024-01-01T01:00:00" in message
+        assert "--refresh" in message
+        assert "python -m ingestion.load" in message
+
+    def test_no_data_at_all_lists_full_range_as_missing(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+
+        with pytest.raises(MissingDataError) as excinfo:
+            store.read(
+                "crypto", "binance", "BTCUSDT", "1h",
+                datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            )
+
+        assert "3 candle(s)" in str(excinfo.value)
+
+    def test_different_source_is_isolated(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows(["2024-01-01T00:00:00Z"], source="binance"),
+            asset_class="crypto",
+        )
+
+        with pytest.raises(MissingDataError):
+            store.read(
+                "crypto", "kraken", "BTCUSDT", "1h",
+                datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            )
+
+    def test_boundary_not_aligned_to_grid_does_not_false_positive(self, tmp_path):
+        # start/end don't fall exactly on the hourly grid — the expected
+        # grid should be ceil(start)/floor(end), not start/end verbatim.
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows(["2024-01-01T01:00:00Z", "2024-01-01T02:00:00Z"]),
+            asset_class="crypto",
+        )
+
+        result = store.read(
+            "crypto", "binance", "BTCUSDT", "1h",
+            datetime(2024, 1, 1, 0, 30, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, 30, tzinfo=timezone.utc),
+        )
+
+        assert len(result) == 2
+
+    def test_start_after_end_raises_value_error(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+
+        with pytest.raises(ValueError):
+            store.read(
+                "crypto", "binance", "BTCUSDT", "1h",
+                datetime(2024, 1, 2, tzinfo=timezone.utc),
+                datetime(2024, 1, 1, tzinfo=timezone.utc),
+            )

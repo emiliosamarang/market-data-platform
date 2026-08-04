@@ -19,6 +19,16 @@ DAILY_LOSS_LIMIT = 0.03  # halt new trades if daily closed PnL drops below -3% o
 
 DB_PATH = "trading_bot.db"
 
+# ---------------------------------------------------------------------------
+# Ingestion
+# ---------------------------------------------------------------------------
+
+INGESTION_SOURCE = "binance"
+INGESTION_ASSET_CLASS = "crypto"
+INGESTION_SYMBOLS = SYMBOLS
+INGESTION_INTERVALS = [LOWER_INTERVAL, HIGHER_INTERVAL]
+RAW_DATA_DIR = "data/raw"
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 

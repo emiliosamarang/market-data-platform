@@ -110,3 +110,4 @@ python -m pytest tests/ --cov=bot --cov-report=term-missing
 | `TestIsTradeWorthIt` | `is_trade_worth_it` | R/R über/unter/gleich Minimum, leerer Plan, custom `min_rr` |
 | `TestCalculatePositionSize` | `calculate_position_size` | Bekannte Werte, zero risk → 0, proportional zu risk% und Accountgrösse |
 | `TestCalculateScore` | `calculate_score` | Finiter Float, NaN → Sentinel −999, breiterer EMA-Spread = höherer Score, hohe Volatilität = tieferer Score |
+Backtest-Ergebnisse variieren stark nach Zeitraum (90d: −6,8 %, 365d: +12,5 %). Profit Factor 1,04 bei 87 % Gebührenanteil am Bruttogewinn. Ohne fixierte Datenbasis und Walk-Forward-Validierung sind Strategieaussagen nicht belastbar → Raw Layer als Voraussetzung.

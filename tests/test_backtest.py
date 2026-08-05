@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -130,12 +131,13 @@ class TestMain:
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
 
-        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+        result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
         assert ("ETHUSDT", "4h") in processed
         assert ("ETHUSDT", "1h") in processed
         assert not any(symbol == "BTCUSDT" for symbol, _ in processed)
         run_backtest_mock.assert_called_once_with("ETHUSDT", "df", "df")
+        assert result == 1
 
     def test_no_combined_report_for_single_symbol(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
@@ -144,9 +146,10 @@ class TestMain:
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
 
-        main(["BTCUSDT"], days=10, refresh=False)
+        result = main(["BTCUSDT"], days=10, refresh=False)
 
         assert log_report_mock.call_count == 1
+        assert result == 0
 
     def test_combined_report_for_multiple_symbols(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
@@ -155,10 +158,11 @@ class TestMain:
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
 
-        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+        result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
         assert log_report_mock.call_count == 3  # BTCUSDT + ETHUSDT + combined
         assert log_report_mock.call_args_list[-1][0][0] == "ALL SYMBOLS COMBINED"
+        assert result == 0
 
     def test_refresh_constructs_one_shared_binance_source(self, monkeypatch):
         source_calls = []
@@ -197,3 +201,130 @@ class TestMain:
 
         fake_source_cls.assert_not_called()
         assert all(s is None for s in source_calls)
+
+
+# ---------------------------------------------------------------------------
+# Incomplete-result reporting: skipped symbols must be impossible to miss,
+# and the process must signal failure via its exit code.
+# ---------------------------------------------------------------------------
+
+class TestIncompleteReporting:
+    def test_combined_label_marks_incomplete_when_a_symbol_is_skipped(self, monkeypatch):
+        def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
+            if symbol == "BTCUSDT":
+                raise MissingDataError("missing BTCUSDT 4h candles")
+            return "df"
+
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.load_history", fake_load_history)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        combined_label = log_report_mock.call_args_list[-1][0][0]
+        assert "INCOMPLETE" in combined_label
+        assert "1/2" in combined_label
+
+    def test_combined_label_unmarked_when_nothing_skipped(self, monkeypatch):
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        combined_label = log_report_mock.call_args_list[-1][0][0]
+        assert combined_label == "ALL SYMBOLS COMBINED"
+
+    def test_exit_code_zero_when_nothing_skipped(self, monkeypatch):
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 0
+
+    def test_exit_code_nonzero_when_a_symbol_is_skipped(self, monkeypatch):
+        def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
+            if symbol == "BTCUSDT":
+                raise MissingDataError("missing BTCUSDT")
+            return "df"
+
+        monkeypatch.setattr("backtest.load_history", fake_load_history)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 1
+
+    def test_generic_load_failure_also_counts_as_skipped(self, monkeypatch):
+        def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
+            if symbol == "BTCUSDT":
+                raise ValueError("boom")
+            return "df"
+
+        monkeypatch.setattr("backtest.load_history", fake_load_history)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        assert result == 1
+        assert "INCOMPLETE" in log_report_mock.call_args_list[-1][0][0]
+
+    def test_single_skipped_symbol_still_reports_prominently(self, monkeypatch, caplog):
+        # No "ALL SYMBOLS COMBINED" report exists for a single symbol — the
+        # skip must still be impossible to miss even without one.
+        def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
+            raise MissingDataError("missing BTCUSDT 4h candles between X and Y")
+
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.load_history", fake_load_history)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        with caplog.at_level(logging.ERROR, logger="backtest"):
+            result = main(["BTCUSDT"], days=10, refresh=False)
+
+        assert result == 1
+        log_report_mock.assert_not_called()
+        assert "INCOMPLETE RESULT" in caplog.text
+        assert "1 of 1" in caplog.text
+        assert "BTCUSDT" in caplog.text
+
+    def test_skipped_summary_names_each_symbol_and_reason(self, monkeypatch, caplog):
+        def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
+            if symbol in ("BTCUSDT", "SOLUSDT"):
+                raise MissingDataError(f"missing data for {symbol}")
+            return "df"
+
+        monkeypatch.setattr("backtest.load_history", fake_load_history)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        with caplog.at_level(logging.ERROR, logger="backtest"):
+            result = main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
+
+        assert result == 1
+        assert "INCOMPLETE RESULT — 2 of 3 symbol(s) skipped" in caplog.text
+        assert "missing data for BTCUSDT" in caplog.text
+        assert "missing data for SOLUSDT" in caplog.text
+        assert "missing data for ETHUSDT" not in caplog.text
+
+    def test_no_skipped_summary_logged_when_nothing_skipped(self, monkeypatch, caplog):
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        with caplog.at_level(logging.ERROR, logger="backtest"):
+            main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        assert "INCOMPLETE RESULT" not in caplog.text

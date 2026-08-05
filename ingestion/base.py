@@ -27,3 +27,18 @@ class MarketDataSource(ABC):
     ) -> pd.DataFrame:
         """Fetch OHLCV candles for [start, end] (inclusive), oldest first."""
         raise NotImplementedError
+
+
+# Maps the ingestion schema's lowercase OHLCV columns onto the capitalized
+# names bot.py's indicator/strategy functions expect.
+_OHLC_RENAME = {"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
+
+
+def to_ohlc_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Reshape an OHLCV_COLUMNS DataFrame into bot.py's expected shape:
+    capitalized Open/High/Low/Close/Volume columns on a DatetimeIndex named
+    "timestamp" — the shape exchange.get_data() historically produced.
+    """
+    result = df.set_index("timestamp")[list(_OHLC_RENAME)].rename(columns=_OHLC_RENAME)
+    result.index.name = "timestamp"
+    return result

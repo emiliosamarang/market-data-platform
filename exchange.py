@@ -1,16 +1,9 @@
 from decimal import Decimal, ROUND_DOWN
 
-import pandas as pd
 from binance.client import Client
 from config import API_KEY, API_SECRET
 
 client = Client(API_KEY, API_SECRET)
-
-_KLINE_COLS = [
-    "open_time", "Open", "High", "Low", "Close", "Volume",
-    "close_time", "quote_volume", "trades",
-    "taker_buy_base", "taker_buy_quote", "ignore",
-]
 
 _symbol_filters: dict = {}
 
@@ -34,24 +27,6 @@ def round_quantity(symbol: str, qty: float) -> float:
 def round_price(symbol: str, price: float) -> float:
     tick = _get_filters(symbol)["PRICE_FILTER"]["tickSize"]
     return _round_step(price, tick)
-
-
-def get_data(symbol: str, interval: str, limit: int = 200) -> pd.DataFrame:
-    raw = client.get_klines(symbol=symbol, interval=interval, limit=limit)
-
-    if not raw:
-        raise ValueError(f"No data returned for {symbol} {interval}")
-
-    df = pd.DataFrame(raw, columns=_KLINE_COLS)
-    df = df[["open_time", "Open", "High", "Low", "Close", "Volume"]].copy()
-    df[["Open", "High", "Low", "Close", "Volume"]] = df[
-        ["Open", "High", "Low", "Close", "Volume"]
-    ].astype(float)
-    df.index = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df.index.name = "timestamp"
-    df = df.drop(columns="open_time").dropna()
-
-    return df
 
 
 def place_market_order(symbol: str, side: str, quantity: float) -> dict:

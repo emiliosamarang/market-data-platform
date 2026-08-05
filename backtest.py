@@ -9,12 +9,17 @@ Usage:
     python backtest.py --refresh                # backfill missing raw data first
 
 Data is read via RawStore from data/raw/ (see ingestion/), not fetched live
-from Binance. If the raw layer doesn't fully cover the requested range, the
-run fails with a clear error unless --refresh is passed, in which case the
-missing range is backfilled through the ingestion layer before backtesting.
+from Binance. If the raw layer doesn't fully cover the requested range for a
+symbol, that symbol is skipped rather than backtested on a partial range.
+Skipped symbols are called out prominently in the combined report (which is
+labeled INCOMPLETE) and in a dedicated summary at the end, and the process
+exits with a non-zero code — so a partial result can never be mistaken for
+a complete one. Pass --refresh to backfill missing data before backtesting
+instead of skipping.
 """
 import argparse
 import logging
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -32,7 +37,7 @@ from config import (
     INGESTION_ASSET_CLASS, INGESTION_SOURCE, RAW_DATA_DIR,
     setup_logging,
 )
-from ingestion.base import MarketDataSource
+from ingestion.base import MarketDataSource, to_ohlc_frame
 from ingestion.binance_source import BinanceSource
 from ingestion.raw_store import MissingDataError, RawStore
 
@@ -40,12 +45,6 @@ log = logging.getLogger(__name__)
 
 WARMUP = 100  # skip first N candles while indicators stabilise
 FEE_RATE = 0.001  # 0.1% per side — Binance standard spot taker fee
-
-# bot.py's indicator/strategy functions expect capitalized OHLCV columns on
-# a DatetimeIndex named "timestamp" — the shape exchange.get_data() used to
-# produce. The ingestion layer's schema is lowercase columns + a plain
-# "timestamp" column, so results are reshaped after reading.
-_RENAME_COLS = {"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +77,7 @@ def load_history(
         store.write(fetched, INGESTION_ASSET_CLASS)
         df = store.read(INGESTION_ASSET_CLASS, INGESTION_SOURCE, symbol, interval, start, end)
 
-    result = df.set_index("timestamp")[list(_RENAME_COLS)].rename(columns=_RENAME_COLS)
-    result.index.name = "timestamp"
-    return result
+    return to_ohlc_frame(df)
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +245,35 @@ def log_report(label: str, trades: list[dict], account: float) -> None:
     log.info("  Final equity:        $%.2f", equity_curve[-1])
 
 
+def log_skipped_symbols(skipped: list[tuple[str, str]], total: int) -> None:
+    """Prominent, hard-to-miss banner listing symbols excluded from the result.
+
+    Logged at ERROR (not folded into a per-symbol log line) so a skipped
+    symbol can never be mistaken for "no signal" — the combined report above
+    it is, by construction, incomplete whenever this fires.
+    """
+    sep = "=" * 52
+    log.error(sep)
+    log.error("  INCOMPLETE RESULT — %d of %d symbol(s) skipped", len(skipped), total)
+    log.error(sep)
+    for symbol, reason in skipped:
+        log.error("  %s — %s", symbol, reason)
+    log.error(sep)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main(symbols: list[str], days: int, refresh: bool) -> None:
+def main(symbols: list[str], days: int, refresh: bool) -> int:
+    """Run the backtest for each symbol. Returns a process exit code.
+
+    0 if every requested symbol produced a result, 1 if any symbol had to
+    be skipped (missing raw data) — a caller checking only stdout/the log
+    could otherwise mistake a partial combined result for a complete one.
+    """
     all_trades: list[dict] = []
+    skipped: list[tuple[str, str]] = []
     store = RawStore(base_dir=RAW_DATA_DIR)
     source = BinanceSource() if refresh else None
     end = datetime.now(timezone.utc)
@@ -265,9 +285,11 @@ def main(symbols: list[str], days: int, refresh: bool) -> None:
             log.info("Loaded %s — %d 1h candles  (%dd window)", symbol, len(df_1h), days)
         except MissingDataError as exc:
             log.error("%s", exc)
+            skipped.append((symbol, str(exc)))
             continue
         except Exception as exc:
             log.error("Load failed for %s — %s", symbol, exc)
+            skipped.append((symbol, str(exc)))
             continue
 
         trades = run_backtest(symbol, df_4h, df_1h)
@@ -275,7 +297,15 @@ def main(symbols: list[str], days: int, refresh: bool) -> None:
         all_trades.extend(trades)
 
     if len(symbols) > 1:
-        log_report("ALL SYMBOLS COMBINED", all_trades, ACCOUNT_SIZE)
+        label = "ALL SYMBOLS COMBINED"
+        if skipped:
+            label += f" — INCOMPLETE ({len(symbols) - len(skipped)}/{len(symbols)} symbols)"
+        log_report(label, all_trades, ACCOUNT_SIZE)
+
+    if skipped:
+        log_skipped_symbols(skipped, len(symbols))
+
+    return 1 if skipped else 0
 
 
 if __name__ == "__main__":
@@ -289,4 +319,4 @@ if __name__ == "__main__":
         help="Backfill missing raw data via ingestion before backtesting",
     )
     args = parser.parse_args()
-    main(args.symbols, args.days, args.refresh)
+    sys.exit(main(args.symbols, args.days, args.refresh))

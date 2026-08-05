@@ -13,9 +13,10 @@ flowchart LR
     end
 
     subgraph Live["Live trading loop"]
-        BOT["bot.py\nscheduler + signal scan"] --> EX["exchange.py\nBinance client wrapper"]
+        BOT["bot.py\nscheduler + signal scan"] --> RAW
+        BOT -.incremental refresh.-> BSRC
         BOT --> TRADER["trader.py\ntrade lifecycle, OCO orders"]
-        TRADER --> EX
+        TRADER --> EX["exchange.py\nBinance order execution"]
         TRADER --> DB[("database.py\nSQLite: signals, trades")]
         BOT --> SENT["sentiment.py\nFear & Greed + Claude news"]
         TRADER --> NOTIFY["notify.py\nTelegram alerts"]
@@ -37,14 +38,14 @@ flowchart LR
 | Module | Responsibility |
 |---|---|
 | `config.py` | Central configuration; secrets loaded from `.env` via `python-dotenv`, never hardcoded |
-| `exchange.py` | Thin Binance client wrapper used by the live bot: fetches recent klines, places market/OCO orders, rounds lot size/tick size |
-| `bot.py` | Indicator calculations, entry-signal strategy, APScheduler loop that scans symbols hourly |
+| `exchange.py` | Thin Binance client wrapper for order execution: places market/OCO orders, rounds lot size/tick size |
+| `bot.py` | Indicator calculations, entry-signal strategy, APScheduler loop that scans symbols hourly. Before each scan, incrementally refreshes the raw layer via `BinanceSource` and reads through `RawStore.read()` — no direct kline fetch. A symbol whose refresh fails is skipped for that cycle rather than traded on stale data |
 | `trader.py` | Trade lifecycle: opens positions, places OCO take-profit/stop-loss, emergency-closes on OCO failure, syncs fills back into the database |
 | `database.py` | SQLite persistence for generated signals and the full trade lifecycle |
 | `notify.py` | Telegram push notifications for trade events and circuit breakers |
 | `sentiment.py` | Fear & Greed Index + Claude-Haiku-based news sentiment, used as a trade filter |
 | `backtest.py` | Historical strategy simulation with equity curve, drawdown, and fee accounting. Reads from the raw layer via `RawStore.read()`, not live from Binance — `--refresh` backfills gaps through `ingestion/` first |
-| `ingestion/` | Source-agnostic data ingestion layer (see below) — decoupled from the live trading path |
+| `ingestion/` | Source-agnostic data ingestion layer (see below), used by both `backtest.py` and `bot.py` |
 
 **`ingestion/` in detail:**
 
@@ -52,7 +53,7 @@ flowchart LR
 - `BinanceSource` (`binance_source.py`) — first concrete implementation. Paginates over long date ranges via `startTime`/`endTime`, retries with exponential backoff on rate-limit responses (HTTP 429/418 or Binance error `-1003`), and deduplicates any candle overlap at page boundaries.
 - `RawStore` (`raw_store.py`) — writes OHLCV DataFrames to Parquet, partitioned by day, at `data/raw/{asset_class}/{source}/{symbol}/{interval}/{date}.parquet`. Writing is idempotent: it reads the existing partition (if any), merges in the new rows, deduplicates on `(timestamp, source, symbol, interval)`, and writes back atomically (temp file + rename) — loading the same or an overlapping time range twice never produces duplicate rows.
 
-This layer is intentionally decoupled from `bot.py` and `exchange.py`: it exists to build a reproducible historical dataset, not to serve the live trading loop.
+`backtest.py` and `bot.py` use the raw layer in opposite orders, matching their different freshness needs: `backtest.py` reads first and only refreshes on a `MissingDataError` (a slightly stale historical cache is fine); `bot.py` always refreshes a small trailing window first and reads after, since a live scan needs the freshest — possibly still-forming — candle and can't tolerate serving a stale one.
 
 ## Tech stack
 

@@ -1,4 +1,6 @@
 import logging
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -10,8 +12,13 @@ import sentiment
 from config import (
     SYMBOLS, HIGHER_INTERVAL, LOWER_INTERVAL, KLINE_LIMIT,
     ACCOUNT_SIZE, RISK_PER_TRADE, MIN_RR, DAILY_LOSS_LIMIT,
+    INGESTION_ASSET_CLASS, INGESTION_SOURCE, RAW_DATA_DIR,
     setup_logging,
 )
+from ingestion.base import to_ohlc_frame
+from ingestion.binance_source import BinanceSource
+from ingestion.raw_store import MissingDataError, RawStore
+from ingestion.time_utils import interval_to_ms
 
 log = logging.getLogger(__name__)
 
@@ -199,6 +206,57 @@ def calculate_score(df_4h: pd.DataFrame, df_1h: pd.DataFrame) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+_store = RawStore(base_dir=RAW_DATA_DIR)
+_source = BinanceSource(client=exchange.client)
+
+_INCREMENTAL_CANDLES = 10  # lookback window (in candles) for the pre-scan refresh
+
+
+class DataUnavailable(Exception):
+    """Fresh market data for a symbol/interval couldn't be obtained.
+
+    Tells scan() to skip the symbol for this cycle rather than trade on
+    stale cached data.
+    """
+
+
+def _load_recent(symbol: str, interval: str, limit: int) -> pd.DataFrame:
+    """Incrementally refresh the raw layer, then read the most recent
+    `limit` candles from it.
+
+    The scan always needs the freshest — possibly still-forming — candle,
+    so this refreshes *before* reading, unlike backtest.py's
+    read-then-refresh-on-miss (fine there with a slightly stale cache, wrong
+    here). Only a small trailing window is re-fetched from Binance each
+    call, not the full `limit`-candle range — the rest is already on disk
+    from the previous scan.
+
+    Raises DataUnavailable if the incremental fetch itself fails, or if the
+    raw layer still doesn't fully cover the requested window afterwards.
+    """
+    interval_ms = interval_to_ms(interval)
+    end = datetime.now(timezone.utc)
+
+    incremental_start = end - timedelta(milliseconds=interval_ms * _INCREMENTAL_CANDLES)
+    try:
+        fresh = _source.fetch_ohlcv(symbol, interval, incremental_start, end)
+        _store.write(fresh, INGESTION_ASSET_CLASS)
+    except Exception as exc:
+        raise DataUnavailable(f"{symbol} {interval} | incremental reload failed: {exc}") from exc
+
+    window_start = end - timedelta(milliseconds=interval_ms * (limit + _INCREMENTAL_CANDLES))
+    try:
+        df = _store.read(INGESTION_ASSET_CLASS, INGESTION_SOURCE, symbol, interval, window_start, end)
+    except MissingDataError as exc:
+        raise DataUnavailable(f"{symbol} {interval} | raw layer incomplete after reload: {exc}") from exc
+
+    return to_ohlc_frame(df).tail(limit)
+
+
+# ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
 
@@ -221,8 +279,8 @@ def scan() -> None:
 
     for symbol in SYMBOLS:
         try:
-            df_4h = exchange.get_data(symbol, HIGHER_INTERVAL, KLINE_LIMIT)
-            df_1h = exchange.get_data(symbol, LOWER_INTERVAL, KLINE_LIMIT)
+            df_4h = _load_recent(symbol, HIGHER_INTERVAL, KLINE_LIMIT)
+            df_1h = _load_recent(symbol, LOWER_INTERVAL, KLINE_LIMIT)
 
             df_4h = add_indicators(df_4h)
             df_1h = add_indicators(df_1h)
@@ -290,6 +348,8 @@ def scan() -> None:
             database.log_signal(record)
             results.append(record)
 
+        except DataUnavailable as exc:
+            log.warning("%s | skipped — %s", symbol, exc)
         except Exception:
             log.exception("Error processing %s", symbol)
 

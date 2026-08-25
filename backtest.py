@@ -35,12 +35,16 @@ from bot import (
 )
 from config import (
     SYMBOLS, ACCOUNT_SIZE, RISK_PER_TRADE,
-    INGESTION_ASSET_CLASS, INGESTION_SOURCE, RAW_DATA_DIR,
+    CURATED_DB_PATH, INGESTION_ASSET_CLASS, INGESTION_SOURCE, RAW_DATA_DIR,
     setup_logging,
 )
 from ingestion.base import MarketDataSource, to_ohlc_frame
 from ingestion.binance_source import BinanceSource
 from ingestion.raw_store import MissingDataError, RawStore
+from transform.db import connect as connect_curated_db
+from transform.dims import populate_all_dims
+from transform.fact_backtest import record_backtest_run, record_backtest_trades
+from transform.schema import create_schema
 
 log = logging.getLogger(__name__)
 
@@ -366,7 +370,11 @@ def _log_benchmark_comparison(
         )
 
 
-def log_report(label: str, trades: list[dict], account: float, benchmark: dict | None = None) -> None:
+def log_report(label: str, trades: list[dict], account: float, benchmark: dict | None = None) -> dict:
+    """Logs the report exactly as before (unchanged), and additionally
+    returns the computed metrics — so callers that persist a run (see
+    transform/fact_backtest.py) don't need a second, possibly-drifting
+    recomputation of the same numbers."""
     closed = [t for t in trades if t.get("pnl") is not None]
     sep = "=" * 52
     log.info(sep)
@@ -377,7 +385,10 @@ def log_report(label: str, trades: list[dict], account: float, benchmark: dict |
         log.warning("  No closed trades.")
         if benchmark is not None:
             _log_benchmark_comparison(0.0, account, 0.0, benchmark)
-        return
+        return {
+            "return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0,
+            "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0,
+        }
 
     pnls = [t["pnl"] for t in closed]
     wins = [p for p in pnls if p > 0]
@@ -434,6 +445,16 @@ def log_report(label: str, trades: list[dict], account: float, benchmark: dict |
     if benchmark is not None:
         _log_benchmark_comparison(total_pnl, account, max_dd_pct, benchmark)
 
+    return {
+        "return_pct": total_pnl / account * 100,
+        "max_drawdown_pct": max_dd_pct,
+        "return_to_dd_ratio": _return_to_drawdown_ratio(total_pnl / account * 100, max_dd_pct),
+        "trades_count": len(closed),
+        "win_rate_pct": win_rate,
+        "profit_factor": profit_factor,
+        "total_fees": total_fees,
+    }
+
 
 def log_skipped_symbols(skipped: list[tuple[str, str]], total: int) -> None:
     """Prominent, hard-to-miss banner listing symbols excluded from the result.
@@ -455,24 +476,51 @@ def log_skipped_symbols(skipped: list[tuple[str, str]], total: int) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main(symbols: list[str], days: int, refresh: bool) -> int:
+def _build_run_metrics(strategy_result: dict, bh_result: dict) -> tuple[dict, dict]:
+    """Reshape log_report()'s and compute_buy_and_hold()'s return values
+    into the flat dicts transform.fact_backtest.record_backtest_run expects."""
+    strategy_metrics = {
+        **strategy_result,
+        "bullish_phase_return_pct": bh_result["strategy_phase_returns"]["BULLISH"],
+        "bearish_phase_return_pct": bh_result["strategy_phase_returns"]["BEARISH"],
+    }
+    bh_metrics = {
+        "return_pct": bh_result["return_pct"],
+        "max_drawdown_pct": bh_result["max_drawdown_pct"],
+        "return_to_dd_ratio": _return_to_drawdown_ratio(bh_result["return_pct"], bh_result["max_drawdown_pct"]),
+        "bullish_phase_return_pct": bh_result["phase_returns"]["BULLISH"],
+        "bearish_phase_return_pct": bh_result["phase_returns"]["BEARISH"],
+        "neutral_phase_return_pct": bh_result["phase_returns"]["NEUTRAL"],
+    }
+    return strategy_metrics, bh_metrics
+
+
+def main(symbols: list[str], days: int, refresh: bool, conn=None) -> int:
     """Run the backtest for each symbol. Returns a process exit code.
 
     0 if every requested symbol produced a result, 1 if any symbol had to
     be skipped (missing raw data) — a caller checking only stdout/the log
     could otherwise mistake a partial combined result for a complete one.
+
+    Every run is additionally persisted into the Curated Layer
+    (fact_backtest_run/fact_backtest_trade) alongside the console report,
+    not instead of it — see transform/fact_backtest.py. Pass `conn` to
+    reuse an existing DuckDB connection (e.g. in tests); otherwise one is
+    opened against CURATED_DB_PATH and closed before returning.
     """
     all_trades: list[dict] = []
     skipped: list[tuple[str, str]] = []
     bh_results: list[dict] = []
+    strategy_results: list[dict] = []
     store = RawStore(base_dir=RAW_DATA_DIR)
     source = BinanceSource() if refresh else None
     end = datetime.now(timezone.utc)
+    run_start = end - timedelta(days=days)
 
     for symbol in symbols:
         try:
             df_4h = load_history(symbol, "4h", end - timedelta(days=days + 30), end, store, refresh, source)
-            df_1h = load_history(symbol, "1h", end - timedelta(days=days), end, store, refresh, source)
+            df_1h = load_history(symbol, "1h", run_start, end, store, refresh, source)
             log.info("Loaded %s — %d 1h candles  (%dd window)", symbol, len(df_1h), days)
         except MissingDataError as exc:
             log.error("%s", exc)
@@ -489,8 +537,10 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
         bh["phase_returns"] = compute_phase_returns_buy_and_hold(df_1h, df_4h, ACCOUNT_SIZE)
         bh["strategy_phase_returns"] = compute_phase_returns_strategy(trades, ACCOUNT_SIZE)
         bh_results.append(bh)
-        log_report(symbol, trades, ACCOUNT_SIZE, benchmark=bh)
+        strategy_results.append(log_report(symbol, trades, ACCOUNT_SIZE, benchmark=bh))
         all_trades.extend(trades)
+
+    final_bh, final_strategy = None, None
 
     if len(symbols) > 1:
         successful = len(symbols) - len(skipped)
@@ -507,10 +557,29 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
             combined_bh["strategy_phase_returns"] = compute_phase_returns_strategy(
                 all_trades, successful * ACCOUNT_SIZE
             )
-        log_report(label, all_trades, successful * ACCOUNT_SIZE, benchmark=combined_bh)
+        combined_strategy = log_report(label, all_trades, successful * ACCOUNT_SIZE, benchmark=combined_bh)
+        final_bh, final_strategy = combined_bh, combined_strategy
+    elif bh_results:
+        final_bh, final_strategy = bh_results[0], strategy_results[0]
 
     if skipped:
         log_skipped_symbols(skipped, len(symbols))
+
+    if final_bh is not None and final_strategy is not None:
+        owns_conn = conn is None
+        conn = conn if conn is not None else connect_curated_db(CURATED_DB_PATH)
+        try:
+            create_schema(conn)
+            populate_all_dims(conn)
+            strategy_metrics, bh_metrics = _build_run_metrics(final_strategy, final_bh)
+            run_id = record_backtest_run(
+                conn, symbols, days, run_start, end, "1h", "4h", FEE_RATE, WARMUP,
+                strategy_metrics, bh_metrics,
+            )
+            record_backtest_trades(conn, run_id, all_trades)
+        finally:
+            if owns_conn:
+                conn.close()
 
     return 1 if skipped else 0
 

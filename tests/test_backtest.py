@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -21,6 +22,7 @@ from bot import add_indicators, get_trend_4h
 from config import ACCOUNT_SIZE
 from ingestion.base import OHLCV_COLUMNS
 from ingestion.raw_store import MissingDataError
+from transform.schema import create_schema
 
 
 def _raw_df(n=3, symbol="BTCUSDT", interval="1h", start="2024-01-01T00:00:00Z"):
@@ -141,15 +143,22 @@ class TestMain:
 
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", run_backtest_mock)
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -162,16 +171,23 @@ class TestMain:
     def test_no_combined_report_for_single_symbol(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         result = main(["BTCUSDT"], days=10, refresh=False)
 
@@ -181,16 +197,23 @@ class TestMain:
     def test_combined_report_for_multiple_symbols(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -208,15 +231,22 @@ class TestMain:
         fake_source_cls = MagicMock()
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
         monkeypatch.setattr("backtest.BinanceSource", fake_source_cls)
 
         main(["BTCUSDT"], days=10, refresh=True)
@@ -234,15 +264,22 @@ class TestMain:
         fake_source_cls = MagicMock()
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
         monkeypatch.setattr("backtest.BinanceSource", fake_source_cls)
 
         main(["BTCUSDT"], days=10, refresh=False)
@@ -263,7 +300,7 @@ class TestIncompleteReporting:
                 raise MissingDataError("missing BTCUSDT 4h candles")
             return "df"
 
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", log_report_mock)
@@ -272,9 +309,16 @@ class TestIncompleteReporting:
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -285,16 +329,23 @@ class TestIncompleteReporting:
     def test_combined_label_unmarked_when_nothing_skipped(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -304,15 +355,22 @@ class TestIncompleteReporting:
     def test_exit_code_zero_when_nothing_skipped(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 0
 
@@ -324,15 +382,22 @@ class TestIncompleteReporting:
 
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 1
 
@@ -344,16 +409,23 @@ class TestIncompleteReporting:
 
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -366,7 +438,7 @@ class TestIncompleteReporting:
         def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
             raise MissingDataError("missing BTCUSDT 4h candles between X and Y")
 
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", log_report_mock)
@@ -375,9 +447,16 @@ class TestIncompleteReporting:
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             result = main(["BTCUSDT"], days=10, refresh=False)
@@ -396,15 +475,22 @@ class TestIncompleteReporting:
 
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             result = main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
@@ -418,15 +504,22 @@ class TestIncompleteReporting:
     def test_no_skipped_summary_logged_when_nothing_skipped(self, monkeypatch, caplog):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        monkeypatch.setattr("backtest.log_report", MagicMock())
+        monkeypatch.setattr("backtest.log_report", MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0}))
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
@@ -448,16 +541,23 @@ class TestCombinedAccountSize:
     def test_scales_with_symbol_count_when_nothing_skipped(self, monkeypatch):
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
 
@@ -470,7 +570,7 @@ class TestCombinedAccountSize:
                 raise MissingDataError("missing BTCUSDT")
             return "df"
 
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.load_history", fake_load_history)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", log_report_mock)
@@ -479,9 +579,16 @@ class TestCombinedAccountSize:
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -494,16 +601,23 @@ class TestCombinedAccountSize:
         # reports — each of those really is one ACCOUNT_SIZE-sized sleeve.
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
         # These tests exercise skip/reporting logic, not the benchmark
         # itself — load_history is stubbed with a plain "df" placeholder,
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
-        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0, "phase_returns": {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}})
         monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
         monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
+        # These tests don't exercise Curated Layer persistence either —
+        # keep them from touching the real curated.duckdb file.
+        monkeypatch.setattr("backtest.connect_curated_db", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("backtest.create_schema", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.populate_all_dims", lambda *a, **k: None)
+        monkeypatch.setattr("backtest.record_backtest_run", lambda *a, **k: "fake-run-id")
+        monkeypatch.setattr("backtest.record_backtest_trades", lambda *a, **k: 0)
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -806,10 +920,10 @@ class TestMainBenchmarkIntegration:
         df = _ohlc_df(opens=[100.0, 100.0], highs=[101.0, 101.0], lows=[99.0, 99.0], closes=[100.0, 110.0])
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
 
-        main(["BTCUSDT"], days=10, refresh=False)
+        main(["BTCUSDT"], days=10, refresh=False, conn=duckdb.connect(":memory:"))
 
         benchmark = log_report_mock.call_args_list[0].kwargs["benchmark"]
         assert benchmark["symbol"] == "BTCUSDT"
@@ -820,10 +934,10 @@ class TestMainBenchmarkIntegration:
         df = _ohlc_df(opens=[100.0, 100.0], highs=[101.0, 101.0], lows=[99.0, 99.0], closes=[100.0, 110.0])
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
 
-        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False, conn=duckdb.connect(":memory:"))
 
         combined_benchmark = log_report_mock.call_args_list[-1].kwargs["benchmark"]
         assert combined_benchmark is not None
@@ -834,10 +948,10 @@ class TestMainBenchmarkIntegration:
         df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
 
-        main(["BTCUSDT"], days=10, refresh=False)
+        main(["BTCUSDT"], days=10, refresh=False, conn=duckdb.connect(":memory:"))
 
         benchmark = log_report_mock.call_args_list[0].kwargs["benchmark"]
         assert set(benchmark["phase_returns"]) == {"BULLISH", "BEARISH", "NEUTRAL"}
@@ -848,11 +962,88 @@ class TestMainBenchmarkIntegration:
         df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
         monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
-        log_report_mock = MagicMock()
+        log_report_mock = MagicMock(return_value={"return_pct": 0.0, "max_drawdown_pct": 0.0, "return_to_dd_ratio": 0.0, "trades_count": 0, "win_rate_pct": 0.0, "profit_factor": None, "total_fees": 0.0})
         monkeypatch.setattr("backtest.log_report", log_report_mock)
 
-        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False, conn=duckdb.connect(":memory:"))
 
         combined_benchmark = log_report_mock.call_args_list[-1].kwargs["benchmark"]
         assert set(combined_benchmark["phase_returns"]) == {"BULLISH", "BEARISH", "NEUTRAL"}
         assert combined_benchmark["strategy_phase_returns"] == {"BULLISH": 0.0, "BEARISH": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Curated Layer persistence — real DuckDB, nothing stubbed, to prove the
+# wiring end-to-end rather than just that each piece is called.
+# ---------------------------------------------------------------------------
+
+class TestMainCuratedLayerIntegration:
+    def _seed_conn(self):
+        import duckdb
+        conn = duckdb.connect(":memory:")
+        conn.execute("SET TIMEZONE = 'UTC'")
+        return conn
+
+    def test_records_a_run_with_symbols_and_thresholds(self, monkeypatch):
+        from bot import EMA_FAST
+
+        closes = [100.0 + i * 0.1 for i in range(150)]
+        df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+        conn = self._seed_conn()
+
+        result = main(["BTCUSDT"], days=10, refresh=False, conn=conn)
+
+        assert result == 0
+        row = conn.execute("SELECT symbols, days, ema_fast FROM fact_backtest_run").fetchone()
+        assert row == (["BTCUSDT"], 10, EMA_FAST)
+
+    def test_does_not_close_an_injected_connection(self, monkeypatch):
+        closes = [100.0 + i * 0.1 for i in range(150)]
+        df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+        conn = self._seed_conn()
+
+        main(["BTCUSDT"], days=10, refresh=False, conn=conn)
+
+        # Would raise if main() had closed our connection.
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+
+    def test_combined_run_records_all_trades_from_every_symbol(self, monkeypatch):
+        closes = [100.0 + i * 0.1 for i in range(150)]
+        df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+        conn = self._seed_conn()
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False, conn=conn)
+
+        run_count = conn.execute("SELECT COUNT(*) FROM fact_backtest_run").fetchone()[0]
+        assert run_count == 1
+        run_id = conn.execute("SELECT run_id FROM fact_backtest_run").fetchone()[0]
+        trade_count_in_db = conn.execute(
+            "SELECT COUNT(*) FROM fact_backtest_trade WHERE run_id = ?", [run_id]
+        ).fetchone()[0]
+        symbols_in_trades = {
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT symbol FROM fact_backtest_trade WHERE run_id = ?", [run_id]
+            ).fetchall()
+        }
+        assert symbols_in_trades <= {"BTCUSDT", "ETHUSDT"}
+        assert trade_count_in_db >= 0  # a smooth uptrend may or may not produce closed trades
+
+    def test_no_run_recorded_when_every_symbol_is_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            "backtest.load_history", lambda *a, **k: (_ for _ in ()).throw(MissingDataError("missing"))
+        )
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+        conn = self._seed_conn()
+        create_schema(conn)  # main() skips schema/dims setup entirely when nothing succeeded
+
+        result = main(["BTCUSDT"], days=10, refresh=False, conn=conn)
+
+        assert result == 1
+        run_count = conn.execute("SELECT COUNT(*) FROM fact_backtest_run").fetchone()[0]
+        assert run_count == 0

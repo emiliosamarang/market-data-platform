@@ -99,6 +99,87 @@ CREATE TABLE IF NOT EXISTS fact_signal (
     score DOUBLE,                   -- bot.calculate_score; -999 sentinel on missing inputs, same as bot.py's own convention
     PRIMARY KEY (symbol, interval, timestamp)
 );
+
+-- One row per backtest.py invocation. Wide and parameter-heavy on purpose:
+-- the point is that in three months you can tell exactly how a run came
+-- about without re-deriving it. commit_hash + is_dirty is what makes a run
+-- reproducible rather than just "some result" — see NOTES.md. Never
+-- overwritten (see ROADMAP.md Historisierung); run_id is a fresh uuid4 per
+-- invocation, not derived from run_ts, so two runs in the same second
+-- can't collide.
+CREATE TABLE IF NOT EXISTS fact_backtest_run (
+    run_id VARCHAR PRIMARY KEY,
+    run_ts TIMESTAMPTZ NOT NULL,
+    commit_hash VARCHAR,      -- NULL if git wasn't available — the run is still recorded, just not reproducible
+    is_dirty BOOLEAN,         -- true if the working tree had uncommitted changes at run time
+    symbols VARCHAR[] NOT NULL,
+    days INTEGER NOT NULL,
+    start_ts TIMESTAMPTZ NOT NULL,
+    end_ts TIMESTAMPTZ NOT NULL,
+    interval_lower VARCHAR NOT NULL,
+    interval_higher VARCHAR NOT NULL,
+    account_size DOUBLE NOT NULL,
+    fee_rate DOUBLE NOT NULL,
+    risk_per_trade DOUBLE NOT NULL,
+    min_rr DOUBLE NOT NULL,
+    warmup INTEGER NOT NULL,
+    -- Strategy thresholds — snapshotted from bot.py's own named constants
+    -- (see bot.py), not a hand-copied second definition.
+    ema_fast INTEGER NOT NULL,
+    ema_slow INTEGER NOT NULL,
+    rsi_period INTEGER NOT NULL,
+    rsi_bullish_low DOUBLE NOT NULL,
+    rsi_bullish_high DOUBLE NOT NULL,
+    rsi_bearish_low DOUBLE NOT NULL,
+    rsi_bearish_high DOUBLE NOT NULL,
+    macd_fast INTEGER NOT NULL,
+    macd_slow INTEGER NOT NULL,
+    macd_signal_period INTEGER NOT NULL,
+    atr_period INTEGER NOT NULL,
+    atr_sl_multiple DOUBLE NOT NULL,
+    atr_tp_multiple DOUBLE NOT NULL,
+    ema20_distance_threshold DOUBLE NOT NULL,
+    volume_ma_window INTEGER NOT NULL,
+    -- Result: strategy and buy-and-hold benchmark side by side, not just
+    -- strategy return — see backtest.py's buy-and-hold benchmark work.
+    trades_count INTEGER,
+    win_rate_pct DOUBLE,
+    profit_factor DOUBLE,
+    total_fees DOUBLE,
+    strategy_return_pct DOUBLE,
+    strategy_max_drawdown_pct DOUBLE,
+    strategy_return_to_dd_ratio DOUBLE,
+    strategy_bullish_phase_return_pct DOUBLE,
+    strategy_bearish_phase_return_pct DOUBLE,
+    bh_return_pct DOUBLE,
+    bh_max_drawdown_pct DOUBLE,
+    bh_return_to_dd_ratio DOUBLE,
+    bh_bullish_phase_return_pct DOUBLE,
+    bh_bearish_phase_return_pct DOUBLE,
+    bh_neutral_phase_return_pct DOUBLE
+);
+
+-- One row per closed trade produced by a run. trade_seq is an ordinal
+-- within the run (trades have no natural unique id otherwise). Never
+-- overwritten, same as fact_backtest_run — a run's trades are exactly
+-- what backtest.py's own trade dicts contain, not a derived summary.
+CREATE TABLE IF NOT EXISTS fact_backtest_trade (
+    run_id VARCHAR NOT NULL REFERENCES fact_backtest_run(run_id),
+    trade_seq INTEGER NOT NULL,
+    symbol VARCHAR NOT NULL REFERENCES dim_symbol(symbol),
+    side VARCHAR NOT NULL,
+    entry_time TIMESTAMPTZ NOT NULL,
+    exit_time TIMESTAMPTZ,
+    entry DOUBLE NOT NULL,
+    exit_price DOUBLE,
+    stop_loss DOUBLE NOT NULL,
+    take_profit DOUBLE NOT NULL,
+    size DOUBLE NOT NULL,
+    exit_reason VARCHAR,
+    fee DOUBLE,
+    pnl DOUBLE,
+    PRIMARY KEY (run_id, trade_seq)
+);
 """
 
 

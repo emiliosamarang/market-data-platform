@@ -153,6 +153,16 @@ hätte, bevor sie zwei Stunden Debugging gekostet hat.
 - Backtest schreibt seine Läufe und Trades als Fakten in die DB statt in die Konsole
 - Historisierung: Läufe werden nie überschrieben, jeder bekommt eine ID und
   seine Parameter mitgespeichert
+- **Portfolio-Backtesting ("Modell B")** — bisher simuliert `backtest.py`
+  jedes Symbol mit einem eigenen, unabhängigen ACCOUNT_SIZE-Sleeve
+  ("Modell A", seit dem Account-Size-Fix korrekt ausgewiesen). Modell B wäre
+  ein einzelnes gemeinsames Konto über alle Symbole, mit `MAX_OPEN_POSITIONS`
+  durchgesetzt und Sizing gegen tatsächlich freies Kapital — das simuliert,
+  was der Live-Bot wirklich täte. Kein Bugfix, sondern eigene Arbeit: sobald
+  mehr Symbole gleichzeitig ein Signal liefern als Slots frei sind, braucht
+  es eine explizite, getestete Auswahlregel (Signalstärke? Reihenfolge im
+  Array? Zufall?) — die verändert nachweislich, welche Trades überhaupt
+  stattfinden, nicht nur wie sie verbucht werden.
 
 ### Phase 4 — Orchestrierung
 *Ziel: Es läuft ohne dich, und ein Fehler ist sichtbar.*

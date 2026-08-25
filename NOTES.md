@@ -209,3 +209,124 @@ Zyklus pro Symbol inkrementell nach (statt zu lesen und nur bei Bedarf
 nachzuladen wie `backtest.py`) — die zugrunde liegende Ursache dieses
 Investigations-Kapitels (veralteter Cache ohne Refresh) kann im Live-Pfad
 damit strukturell nicht mehr auftreten.
+
+## Investigation: Backtest-Rendite-Sprung nach Raw-Layer-Refresh (12,5 % → 86,1 %)
+
+Nach dem Backfill (Raw Layer wieder taufrisch, Data-Quality-Layer grün) lief
+`backtest.py --days 365` für alle 5 Symbole und meldete **+86,1 %** Rendite —
+gegenüber den in der README dokumentierten **+12,5 %** (365 Tage, 3 Symbole,
+Stand vorheriger Lauf) ein Sprung um Faktor 7. Ein Ergebnis, das sich nach
+einem reinen Infrastruktur-Refactor (Datenzugriff auf Raw Layer umgestellt,
+Strategielogik unangetastet) versiebenfacht, ist erstmal Bug-Verdacht, kein
+Erfolg — Untersuchung entlang vier Punkten: Gebühren, Look-ahead-Bias,
+Positionsgrößen/Kapitalgrenze, Symbol-Konzentration.
+
+**Korrektur an der Ausgangsdiagnose, bevor der Sprung überhaupt bewertet
+werden kann:** Der alte 12,5-%-Wert war selbst falsch. `log_report()` teilt
+den Netto-Gewinn immer durch die feste Konstante `ACCOUNT_SIZE` (1000), auch
+im kombinierten Report — unabhängig davon, wie viele Symbole tatsächlich mit
+eigenem Kapital-Sleeve gehandelt haben. Beim alten 3-Symbol-Lauf waren
+$125 Netto ($972 Brutto − $847 Fees) im Einsatz, geteilt durch $1000 statt
+durch $3000 (drei unabhängige Sleeves à $1000, siehe `calculate_position_size`
+in `bot.py` — jedes Symbol sized gegen die volle `ACCOUNT_SIZE`, es gibt kein
+gemeinsames Kapital-Limit). Richtig gerechnet: **4,2 %**, nicht 12,5 %. Der
+tatsächlich zu erklärende Sprung ist also **4,2 % → 17,2 %** (17,2 % ist der
+korrigierte Wert für den neuen 5-Symbol-Lauf, s.u.) — immer noch Faktor ~4,
+aber ein anderes Problem als ursprünglich gedacht.
+
+**1. Gebühren — nicht die Ursache.** `run_backtest()`, `log_report()` und die
+Fee-Formel (`fee = (entry + exit) * size * 0.1%`, pro Trade einmal beim Exit
+verbucht) sind im Raw-Layer-Refactor (Commit `e4fce30`) byte-identisch
+geblieben — nur `fetch_history()` → `load_history()` (der Datenzugriff) hat
+sich geändert. Aufschlüsselung des neuen 5-Symbol-Laufs:
+
+| Symbol | Trades | Brutto | Fees | Netto | Fee/Brutto |
+|---|---|---|---|---|---|
+| BTCUSDT | 159 | $389.99 | $372.06 | $17.93 | 95.4% |
+| ETHUSDT | 146 | $219.94 | $272.20 | −$52.26 | 123.8% |
+| SOLUSDT | 141 | $452.18 | $215.25 | $236.92 | 47.6% |
+| XRPUSDT | 158 | $581.36 | $265.23 | $316.13 | 45.6% |
+| ADAUSDT | 145 | $530.02 | $187.30 | $342.73 | 35.3% |
+| **Total** | 749 | **$2173.50** | **$1312.05** | **$861.45** | **60.4%** |
+
+Fees fressen weiterhin 60,4 % des Bruttogewinns — deutlich weniger als die
+87 % aus dem alten 3-Symbol-Lauf, aber **nicht weil die Gebühren gesunken
+sind** (die Formel und der Satz von 0,1 % pro Seite sind unverändert),
+sondern weil der Bruttogewinn diesmal größer war. Die verbesserte Fee-Quote
+ist eine Folge des Ergebnisses, keine unabhängige Bestätigung dafür.
+
+**2. Look-ahead-Bias — nicht gefunden.** In `run_backtest()` wird das Signal
+strikt auf Daten bis einschließlich der aktuellen, bereits geschlossenen
+Kerze berechnet (`df_1h.iloc[:i+1]`, `df_4h[df_4h.index <= current_time]`);
+der Einstieg erfolgt explizit am Open der **nächsten** Kerze
+(`df_1h.iloc[i+1]["Open"]`, Kommentar im Code: "avoids lookahead bias on
+entry price"). Diese Zeile existierte bereits vor dem Refactor unverändert.
+`RawStore.load_range()`/`read()` liefern garantiert lückenlos sortierte,
+deduplizierte Daten (durch den neuen Data-Quality-Layer laufend geprüft),
+`iloc[i+1]` ist also immer exakt ein Intervall später — kein Indexversatz
+durch `load_range(..., dedupe=...)`.
+
+**3. Positionsgrößen/Kapitalgrenze — der eigentliche Fund.**
+`calculate_position_size()` sized jeden Trade gegen die feste Konstante
+`ACCOUNT_SIZE` (kein Compounding — unproblematisch). Aber `MAX_OPEN_POSITIONS`
+(=3, in `trader.py` für den Live-Bot durchgesetzt) wird in `backtest.py`
+**an keiner Stelle geprüft** — jedes Symbol simuliert vollständig unabhängig,
+ohne gemeinsames Kapital- oder Positionslimit ("Modell A": separate Sleeves).
+Der kombinierte Report hat trotzdem durch eine einzige feste `ACCOUNT_SIZE`
+geteilt — mit jedem zusätzlichen Symbol im Lauf bläht sich die gemeldete
+"Return on account" damit rein rechnerisch auf.
+
+**Gegenprobe:** Backtest erneut nur mit den drei alten Symbolen (BTCUSDT,
+ETHUSDT, SOLUSDT), gleiches 365-Tage-Fenster (heute, drei Wochen mehr Daten
+als beim alten Lauf): **$202.60 Netto**, exakt die Summe der drei
+Einzelwerte aus obiger Tabelle. Auf $3000 (drei Sleeves) gerechnet: **6,8 %**
+— genau der erwartete Wert, plausibel gegenüber 4,2 % beim alten,
+kürzeren Fenster. Die Gegenprobe schließt die Sache: der Rest des Deltas
+(6,8 % → 17,2 %) erklärt sich vollständig durch XRPUSDT und ADAUSDT, die in
+diesem Zeitraum zufällig die profitabelsten der fünf Symbole waren.
+
+**Fix ("Modell A"):** `main()` in `backtest.py` teilt den kombinierten Report
+jetzt durch `successful * ACCOUNT_SIZE` (`successful` = Anzahl tatsächlich
+gelaufener, nicht übersprungener Symbole) statt durch eine feste
+`ACCOUNT_SIZE`. Ändert kein einziges Trade-Ergebnis, nur den Nenner. Neuer
+5-Symbol-Lauf nach dem Fix: **+17,2 %** (vorher fälschlich +86,1 %),
+Max-Drawdown korrekt von 17,3 % auf 3,8 % korrigiert (dieselbe
+Equity-Kurve-Berechnung startet ebenfalls bei `account`). Regressionstest in
+`tests/test_backtest.py::TestCombinedAccountSize` prüft, dass der Nenner mit
+der Symbolanzahl skaliert und übersprungene Symbole ausschließt — genau der
+Test, der diesen Bug von Anfang an verhindert hätte.
+
+Ein "echtes" Portfolio-Backtesting mit gemeinsamem Konto,
+`MAX_OPEN_POSITIONS`-Cap und einer definierten Auswahlregel bei
+Signal-Konflikten ("Modell B") ist kein Bugfix, sondern eigene Arbeit —
+als Backlog-Item in `ROADMAP.md` (Phase 3) aufgenommen statt hier
+reingepatcht.
+
+**4. Symbol-Konzentration — die eigentlich belastbare Aussage aus diesem
+Lauf.** Aufschlüsselung nach Netto-Beitrag:
+
+| Symbol | Netto-PnL | Anteil |
+|---|---|---|
+| ADAUSDT | $342.73 | 39.8% |
+| XRPUSDT | $316.13 | 36.7% |
+| SOLUSDT | $236.92 | 27.5% |
+| BTCUSDT | $17.93 | 2.1% |
+| ETHUSDT | −$52.26 | −6.1% |
+
+Kein einzelnes Symbol dominiert (kein Wert über 70 %), aber das gesamte
+Ergebnis kommt aus drei Alts (ADA/XRP/SOL) in einem Zeitraum, in dem Alts
+liefen. Auf den beiden liquidesten, "seriösesten" Paaren — BTC und ETH — ist
+die Strategie nach Gebühren eine Nullnummer bis Verlustbringerin: $17.93 auf
+159 BTC-Trades (95,4 % Fee-Quote), ETH sogar netto negativ (123,8 %
+Fee-Quote — die Gebühren übersteigen den Bruttogewinn). Auf den liquidesten
+Paaren ist die Strategie eine Gebührenmaschine ohne erkennbare Kante.
+
+**Fazit:** Kein Bug im Raw-Layer-Refactor selbst (Simulation, Fee-Logik und
+Signal-Timing sind unverändert und wurden explizit gegengeprüft). Der
+Rendite-Sprung erklärt sich vollständig durch (a) einen vorbestehenden
+Kapital-Buchhaltungsfehler im kombinierten Report, der mit der Symbolanzahl
+skaliert — jetzt gefixt — und (b) zwei zusätzliche, in diesem Zeitraum
+zufällig profitable Alt-Symbole. Der Satz "Strategie ist noch nicht
+belastbar validiert" (README) bleibt damit unverändert stehen — bestätigt
+durch einen zweiten, hier selbst gefundenen Reporting-Bug, nicht widerlegt
+durch eine höhere Zahl.

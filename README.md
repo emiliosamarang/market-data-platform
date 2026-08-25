@@ -119,11 +119,26 @@ Backtest of the EMA/RSI/MACD/ATR strategy (`bot.py`) against historical Binance 
 | Period | Scope | Net return | Profit factor | Fees | Gross profit |
 |---|---|---|---|---|---|
 | 90 days | BTCUSDT only | **−6.8%** | **0.75** | — | — |
-| 365 days | 3 symbols combined | **+12.5%** | **1.04** | **$847** | **~$972** |
+| 365 days | 3 symbols combined | **+4.2%** *(corrected — originally reported as +12.5%, see below)* | **1.04** | **$847** | **~$972** |
+| 365 days | 5 symbols combined | **+17.2%** *(corrected — originally reported as +86.1%)* | **1.17** | **$1312** | **$2174** |
 
-**Conclusion:** transaction costs consume most of the strategy's edge — in the 365-day run, fees ate roughly 87% of gross profit, and a profit factor of 1.04 leaves almost no margin for error. Results also swing sharply with the chosen time window (a strongly profitable year vs. a losing quarter), which means single-run backtest numbers are not a reliable basis for judging the strategy.
+**A reporting bug, found and fixed, not a real return jump:** the combined-report line divided total PnL by a single fixed `ACCOUNT_SIZE` regardless of how many symbols contributed trades — but each symbol trades its own independent `ACCOUNT_SIZE`-sized sleeve, with no shared capital or `MAX_OPEN_POSITIONS` cap across symbols in the backtest. Both rows above were originally misreported (the 3-symbol figure divided $125 net by $1000 instead of $3000; the 5-symbol figure divided $861 by $1000 instead of $5000) — the more symbols in a run, the more inflated the number looked. Fixed in `backtest.py` (`successful * ACCOUNT_SIZE` as the denominator) with a regression test asserting the denominator scales with symbol count. Full root-cause writeup, including the counter-check that closes it out, in `NOTES.md`.
 
-This is exactly why the current priority is the `ingestion/` raw-data layer rather than further strategy tuning: without a fixed, reproducible historical dataset and proper walk-forward validation, any backtest result — good or bad — is not trustworthy enough to act on.
+**The result that does survive scrutiny** is the per-symbol breakdown of the 5-symbol run — and it's not flattering:
+
+| Symbol | Trades | Gross | Fees | Net | Fee/Gross |
+|---|---|---|---|---|---|
+| BTCUSDT | 159 | $389.99 | $372.06 | $17.93 | 95.4% |
+| ETHUSDT | 146 | $219.94 | $272.20 | **−$52.26** | 123.8% |
+| SOLUSDT | 141 | $452.18 | $215.25 | $236.92 | 47.6% |
+| XRPUSDT | 158 | $581.36 | $265.23 | $316.13 | 45.6% |
+| ADAUSDT | 145 | $530.02 | $187.30 | $342.73 | 35.3% |
+
+On the two most liquid pairs — BTC and ETH — the strategy is a fee machine with no real edge: $18 net on 159 BTC trades, and ETH loses money outright once fees are subtracted. The entire combined result comes from three alts (ADA/XRP/SOL) during a period when alts happened to run; that's concentration in a favorable window, not a validated edge. And the improved 60.4% fee-to-gross ratio (vs. 87% previously) is not because fees got cheaper — the formula and the 0.1%-per-side rate are byte-identical — it's purely because gross profit was larger this time.
+
+**Conclusion:** transaction costs consume most of the strategy's edge on its most liquid, most realistic-to-trade symbols, and the aggregate result is concentrated in a handful of smaller-cap symbols during a favorable window rather than broad-based. Results also swing sharply with the chosen time window (a strongly profitable year vs. a losing quarter), which means single-run backtest numbers are not a reliable basis for judging the strategy.
+
+This is exactly why the current priority is the `ingestion/` raw-data layer and its data-quality/reporting correctness rather than further strategy tuning: without a fixed, reproducible historical dataset, proper walk-forward validation, and a backtest that accounts for capital correctly, any result — good or bad — is not trustworthy enough to act on.
 
 ## Roadmap
 

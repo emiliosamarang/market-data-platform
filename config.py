@@ -31,8 +31,18 @@ INGESTION_SOURCE = "binance"
 INGESTION_ASSET_CLASS = "crypto"
 INGESTION_SYMBOLS = SYMBOLS
 INGESTION_INTERVALS = [LOWER_INTERVAL, HIGHER_INTERVAL]
+# Order encodes canonical-row priority in fact_ohlcv_canonical (dim_source.priority,
+# see transform/) — lower index wins. Binance has full history, Kraken is
+# validation-only (see NOTES.md), so Binance goes first.
+INGESTION_SOURCES = ["binance", "kraken"]
 RAW_DATA_DIR = "data/raw"
 QUALITY_REPORT_DIR = "data/quality"
+
+# ---------------------------------------------------------------------------
+# Curated layer (transform/)
+# ---------------------------------------------------------------------------
+
+CURATED_DB_PATH = "data/curated.duckdb"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")

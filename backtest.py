@@ -22,6 +22,7 @@ import logging
 import sys
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 
 from bot import (
@@ -246,10 +247,84 @@ def combine_buy_and_hold(results: list[dict], account_per_symbol: float) -> dict
     drawdown_pct = (peak - combined_equity) / peak * 100
     max_drawdown_pct = drawdown_pct.max()
 
-    return {
+    combined = {
         "net_pnl": total_net_pnl,
         "return_pct": return_pct,
         "max_drawdown_pct": max_drawdown_pct,
+    }
+
+    if all("phase_returns" in r for r in results):
+        # Un-percent each symbol's phase return back to dollars (all symbols
+        # share the same account_per_symbol base), sum, then re-express as
+        # percent of the combined account — consistent with how the
+        # combined return_pct above is derived.
+        combined["phase_returns"] = {
+            phase: sum(r["phase_returns"][phase] / 100 * account_per_symbol for r in results)
+            / total_account * 100
+            for phase in ("BULLISH", "BEARISH", "NEUTRAL")
+        }
+
+    return combined
+
+
+# ---------------------------------------------------------------------------
+# Risk-adjusted return and market-phase attribution
+# ---------------------------------------------------------------------------
+
+def _return_to_drawdown_ratio(return_pct: float, max_drawdown_pct: float) -> float:
+    """Return per unit of max drawdown — the risk-adjusted view a raw
+    return-percent comparison can hide (e.g. a benchmark with a much
+    higher return but proportionally far higher drawdown)."""
+    if max_drawdown_pct == 0:
+        return float("inf") if return_pct > 0 else 0.0
+    return return_pct / max_drawdown_pct
+
+
+def compute_market_phases(df_4h: pd.DataFrame) -> pd.Series:
+    """Classify every 4h candle BULLISH/BEARISH/NEUTRAL using bot.py's own
+    get_trend_4h — the exact filter the strategy itself uses to gate
+    entries, not a second, separately-defined notion of "trend".
+
+    Only needed for the buy-and-hold side of the phase-return breakdown:
+    the strategy doesn't need this at all, since a trade's own `side`
+    already encodes the phase it was opened in (BUY only ever opens in a
+    BULLISH phase, SELL only in BEARISH — see generate_entry_signal).
+    """
+    phases = [get_trend_4h(df_4h.iloc[: i + 1]) for i in range(len(df_4h))]
+    return pd.Series(phases, index=df_4h.index, name="phase")
+
+
+def compute_phase_returns_buy_and_hold(df_1h: pd.DataFrame, df_4h: pd.DataFrame, account: float) -> dict:
+    """Decompose buy-and-hold's total price return into the portion earned
+    while the market was BULLISH vs BEARISH vs NEUTRAL by bot.py's own
+    trend filter. Log-returns are additive, so summing per phase and
+    exponentiating back attributes the whole period's return without
+    double-counting or compounding error. Percent of `account`, matching
+    compute_buy_and_hold's own units.
+    """
+    df_4h = add_indicators(df_4h)
+    phases_4h = compute_market_phases(df_4h)
+    phase_1h = phases_4h.reindex(df_1h.index, method="ffill")
+
+    log_returns = np.log(df_1h["Close"] / df_1h["Close"].shift(1))
+
+    result = {}
+    for phase in ("BULLISH", "BEARISH", "NEUTRAL"):
+        phase_log_return = log_returns[phase_1h == phase].sum()
+        result[phase] = (np.exp(phase_log_return) - 1) * 100
+    return result
+
+
+def compute_phase_returns_strategy(trades: list[dict], account: float) -> dict:
+    """Strategy's own phase breakdown, as percent of `account` — grouped by
+    trade side rather than reclassifying candles, since side already IS
+    the phase the trade was opened in (see compute_market_phases)."""
+    closed = [t for t in trades if t.get("pnl") is not None]
+    bullish_pnl = sum(t["pnl"] for t in closed if t["side"] == "BUY")
+    bearish_pnl = sum(t["pnl"] for t in closed if t["side"] == "SELL")
+    return {
+        "BULLISH": bullish_pnl / account * 100,
+        "BEARISH": bearish_pnl / account * 100,
     }
 
 
@@ -257,14 +332,38 @@ def combine_buy_and_hold(results: list[dict], account_per_symbol: float) -> dict
 # Reporting
 # ---------------------------------------------------------------------------
 
-def _log_benchmark_comparison(total_pnl: float, account: float, benchmark: dict) -> None:
+def _log_benchmark_comparison(
+    total_pnl: float, account: float, strategy_max_dd_pct: float, benchmark: dict
+) -> None:
     strategy_return_pct = total_pnl / account * 100
     diff_pct = strategy_return_pct - benchmark["return_pct"]
+    strategy_ratio = _return_to_drawdown_ratio(strategy_return_pct, strategy_max_dd_pct)
+    bh_ratio = _return_to_drawdown_ratio(benchmark["return_pct"], benchmark["max_drawdown_pct"])
+
     log.info("  ---")
     log.info("  Buy & Hold return:    %+.1f%%", benchmark["return_pct"])
     log.info("  Strategy return:      %+.1f%%", strategy_return_pct)
     log.info("  Strategy vs B&H:      %+.1f pp", diff_pct)
     log.info("  Buy & Hold max DD:    %.1f%%", benchmark["max_drawdown_pct"])
+    log.info("  Return/MaxDD (B&H):   %.2f", bh_ratio)
+    log.info("  Return/MaxDD (Strat): %.2f", strategy_ratio)
+
+    phase_returns = benchmark.get("phase_returns")
+    strategy_phase_returns = benchmark.get("strategy_phase_returns")
+    if phase_returns is not None and strategy_phase_returns is not None:
+        log.info("  --- Return by market phase (bot.py's own trend filter) ---")
+        log.info(
+            "  Bullish phase — B&H: %+.1f%%   Strategy: %+.1f%%",
+            phase_returns["BULLISH"], strategy_phase_returns["BULLISH"],
+        )
+        log.info(
+            "  Bearish phase — B&H: %+.1f%%   Strategy: %+.1f%%",
+            phase_returns["BEARISH"], strategy_phase_returns["BEARISH"],
+        )
+        log.info(
+            "  Neutral phase — B&H: %+.1f%%   Strategy: n/a (never trades in NEUTRAL)",
+            phase_returns["NEUTRAL"],
+        )
 
 
 def log_report(label: str, trades: list[dict], account: float, benchmark: dict | None = None) -> None:
@@ -277,7 +376,7 @@ def log_report(label: str, trades: list[dict], account: float, benchmark: dict |
     if not closed:
         log.warning("  No closed trades.")
         if benchmark is not None:
-            _log_benchmark_comparison(0.0, account, benchmark)
+            _log_benchmark_comparison(0.0, account, 0.0, benchmark)
         return
 
     pnls = [t["pnl"] for t in closed]
@@ -333,7 +432,7 @@ def log_report(label: str, trades: list[dict], account: float, benchmark: dict |
     log.info("  Final equity:        $%.2f", equity_curve[-1])
 
     if benchmark is not None:
-        _log_benchmark_comparison(total_pnl, account, benchmark)
+        _log_benchmark_comparison(total_pnl, account, max_dd_pct, benchmark)
 
 
 def log_skipped_symbols(skipped: list[tuple[str, str]], total: int) -> None:
@@ -387,6 +486,8 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
         trades = run_backtest(symbol, df_4h, df_1h)
         bh = compute_buy_and_hold(df_1h, ACCOUNT_SIZE)
         bh["symbol"] = symbol
+        bh["phase_returns"] = compute_phase_returns_buy_and_hold(df_1h, df_4h, ACCOUNT_SIZE)
+        bh["strategy_phase_returns"] = compute_phase_returns_strategy(trades, ACCOUNT_SIZE)
         bh_results.append(bh)
         log_report(symbol, trades, ACCOUNT_SIZE, benchmark=bh)
         all_trades.extend(trades)
@@ -402,6 +503,10 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
         # scale accordingly, or "return on account" silently inflates with
         # every symbol added to the run.
         combined_bh = combine_buy_and_hold(bh_results, ACCOUNT_SIZE) if bh_results else None
+        if combined_bh is not None:
+            combined_bh["strategy_phase_returns"] = compute_phase_returns_strategy(
+                all_trades, successful * ACCOUNT_SIZE
+            )
         log_report(label, all_trades, successful * ACCOUNT_SIZE, benchmark=combined_bh)
 
     if skipped:

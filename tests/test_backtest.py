@@ -5,7 +5,19 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from backtest import FEE_RATE, combine_buy_and_hold, compute_buy_and_hold, load_history, log_report, main
+from backtest import (
+    FEE_RATE,
+    _return_to_drawdown_ratio,
+    combine_buy_and_hold,
+    compute_buy_and_hold,
+    compute_market_phases,
+    compute_phase_returns_buy_and_hold,
+    compute_phase_returns_strategy,
+    load_history,
+    log_report,
+    main,
+)
+from bot import add_indicators, get_trend_4h
 from config import ACCOUNT_SIZE
 from ingestion.base import OHLCV_COLUMNS
 from ingestion.raw_store import MissingDataError
@@ -136,6 +148,8 @@ class TestMain:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -156,6 +170,8 @@ class TestMain:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         result = main(["BTCUSDT"], days=10, refresh=False)
 
@@ -173,6 +189,8 @@ class TestMain:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -197,6 +215,8 @@ class TestMain:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
         monkeypatch.setattr("backtest.BinanceSource", fake_source_cls)
 
         main(["BTCUSDT"], days=10, refresh=True)
@@ -221,6 +241,8 @@ class TestMain:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
         monkeypatch.setattr("backtest.BinanceSource", fake_source_cls)
 
         main(["BTCUSDT"], days=10, refresh=False)
@@ -251,6 +273,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -269,6 +293,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -285,6 +311,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 0
 
@@ -303,6 +331,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 1
 
@@ -322,6 +352,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -344,6 +376,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             result = main(["BTCUSDT"], days=10, refresh=False)
@@ -369,6 +403,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             result = main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
@@ -389,6 +425,8 @@ class TestIncompleteReporting:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
@@ -418,6 +456,8 @@ class TestCombinedAccountSize:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
 
@@ -440,6 +480,8 @@ class TestCombinedAccountSize:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -460,6 +502,8 @@ class TestCombinedAccountSize:
         # which real compute_buy_and_hold can't operate on.
         monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_buy_and_hold", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0})
+        monkeypatch.setattr("backtest.compute_phase_returns_strategy", lambda *a, **k: {"BULLISH": 0.0, "BEARISH": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -473,12 +517,13 @@ class TestCombinedAccountSize:
 # Buy-and-hold benchmark
 # ---------------------------------------------------------------------------
 
-def _ohlc_df(opens, highs, lows, closes, start="2024-01-01T00:00:00Z"):
+def _ohlc_df(opens, highs, lows, closes, start="2024-01-01T00:00:00Z", freq="1h", volume=10.0):
     """bot.py-shape frame (capitalized OHLC columns, DatetimeIndex) — the
     shape compute_buy_and_hold/run_backtest actually operate on."""
-    index = pd.date_range(start, periods=len(closes), freq="1h", tz="UTC")
+    index = pd.date_range(start, periods=len(closes), freq=freq, tz="UTC")
     return pd.DataFrame(
-        {"Open": opens, "High": highs, "Low": lows, "Close": closes}, index=index
+        {"Open": opens, "High": highs, "Low": lows, "Close": closes, "Volume": [volume] * len(closes)},
+        index=index,
     )
 
 
@@ -615,6 +660,146 @@ class TestLogReportBenchmark:
         assert "Buy & Hold return:    +10.0%" in caplog.text
         assert "Strategy return:      +0.0%" in caplog.text
 
+    def test_logs_return_to_drawdown_ratio(self, caplog):
+        trades = [{"pnl": 50.0, "exit_reason": "TP"}]
+        benchmark = {"return_pct": 10.0, "max_drawdown_pct": 5.0}
+
+        with caplog.at_level(logging.INFO, logger="backtest"):
+            log_report("BTCUSDT", trades, 1000.0, benchmark=benchmark)
+
+        assert "Return/MaxDD (B&H):   2.00" in caplog.text
+
+    def test_logs_phase_lines_when_provided(self, caplog):
+        trades = [{"pnl": 50.0, "exit_reason": "TP"}]
+        benchmark = {
+            "return_pct": 10.0, "max_drawdown_pct": 5.0,
+            "phase_returns": {"BULLISH": 8.0, "BEARISH": 1.5, "NEUTRAL": 0.5},
+            "strategy_phase_returns": {"BULLISH": 4.0, "BEARISH": 1.0},
+        }
+
+        with caplog.at_level(logging.INFO, logger="backtest"):
+            log_report("BTCUSDT", trades, 1000.0, benchmark=benchmark)
+
+        assert "Bullish phase — B&H: +8.0%   Strategy: +4.0%" in caplog.text
+        assert "Bearish phase — B&H: +1.5%   Strategy: +1.0%" in caplog.text
+        assert "Neutral phase — B&H: +0.5%" in caplog.text
+
+    def test_no_phase_lines_when_phase_data_absent(self, caplog):
+        trades = [{"pnl": 50.0, "exit_reason": "TP"}]
+        benchmark = {"return_pct": 10.0, "max_drawdown_pct": 5.0}
+
+        with caplog.at_level(logging.INFO, logger="backtest"):
+            log_report("BTCUSDT", trades, 1000.0, benchmark=benchmark)
+
+        assert "market phase" not in caplog.text
+
+
+class TestReturnToDrawdownRatio:
+    def test_basic_ratio(self):
+        assert _return_to_drawdown_ratio(20.0, 10.0) == pytest.approx(2.0)
+
+    def test_negative_return(self):
+        assert _return_to_drawdown_ratio(-20.0, 10.0) == pytest.approx(-2.0)
+
+    def test_zero_drawdown_with_positive_return_is_infinite(self):
+        assert _return_to_drawdown_ratio(5.0, 0.0) == float("inf")
+
+    def test_zero_drawdown_with_zero_return_is_zero(self):
+        assert _return_to_drawdown_ratio(0.0, 0.0) == 0.0
+
+
+class TestComputeMarketPhases:
+    def test_matches_direct_get_trend_4h_call_on_final_row(self):
+        n = 60
+        closes = [100.0 + i * 0.5 for i in range(n)]
+        df_4h = _ohlc_df(
+            opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes,
+            freq="4h",
+        )
+        df_4h = add_indicators(df_4h)
+
+        phases = compute_market_phases(df_4h)
+
+        assert len(phases) == n
+        assert list(phases.index) == list(df_4h.index)
+        assert phases.iloc[-1] == get_trend_4h(df_4h)
+
+    def test_sustained_uptrend_eventually_classified_bullish(self):
+        n = 60
+        closes = [100.0 + i * 1.0 for i in range(n)]
+        df_4h = _ohlc_df(
+            opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes,
+            freq="4h",
+        )
+        df_4h = add_indicators(df_4h)
+
+        phases = compute_market_phases(df_4h)
+
+        assert phases.iloc[-1] == "BULLISH"
+
+
+class TestComputePhaseReturnsBuyAndHold:
+    def test_phases_recombine_multiplicatively_to_total_price_return(self, monkeypatch):
+        # Log-returns are additive, so per-phase-summed-then-exponentiated
+        # percentages must recombine *multiplicatively* to the whole
+        # period's raw price return — the identity the whole function
+        # relies on. Bypass real trend classification with a hand-picked
+        # phase assignment covering all three buckets, so the test is
+        # about the attribution math, not get_trend_4h's own rules.
+        closes = [100.0, 102.0, 101.0, 105.0, 103.0, 108.0, 107.0, 110.0]
+        df_1h = _ohlc_df(
+            opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes,
+        )
+        fake_phases = pd.Series(
+            ["BULLISH", "BULLISH", "BEARISH", "BULLISH", "NEUTRAL", "BULLISH", "BEARISH", "BULLISH"],
+            index=df_1h.index,
+        )
+        monkeypatch.setattr("backtest.compute_market_phases", lambda df_4h: fake_phases)
+        df_4h_placeholder = _ohlc_df(opens=[100.0], highs=[101.0], lows=[99.0], closes=[100.0], freq="4h")
+
+        result = compute_phase_returns_buy_and_hold(df_1h, df_4h_placeholder, account=1000.0)
+
+        assert set(result) == {"BULLISH", "BEARISH", "NEUTRAL"}
+        recombined = (
+            (1 + result["BULLISH"] / 100) * (1 + result["BEARISH"] / 100) * (1 + result["NEUTRAL"] / 100) - 1
+        )
+        raw_price_return = (closes[-1] - closes[0]) / closes[0]
+        assert recombined == pytest.approx(raw_price_return, rel=1e-9)
+
+    def test_phase_never_occurring_contributes_zero(self, monkeypatch):
+        closes = [100.0, 102.0, 104.0]
+        df_1h = _ohlc_df(
+            opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes,
+        )
+        fake_phases = pd.Series(["BULLISH", "BULLISH", "BULLISH"], index=df_1h.index)
+        monkeypatch.setattr("backtest.compute_market_phases", lambda df_4h: fake_phases)
+        df_4h_placeholder = _ohlc_df(opens=[100.0], highs=[101.0], lows=[99.0], closes=[100.0], freq="4h")
+
+        result = compute_phase_returns_buy_and_hold(df_1h, df_4h_placeholder, account=1000.0)
+
+        assert result["BEARISH"] == pytest.approx(0.0)
+        assert result["NEUTRAL"] == pytest.approx(0.0)
+
+
+class TestComputePhaseReturnsStrategy:
+    def test_groups_pnl_by_trade_side(self):
+        trades = [
+            {"side": "BUY", "pnl": 50.0},
+            {"side": "BUY", "pnl": -20.0},
+            {"side": "SELL", "pnl": 30.0},
+            {"side": "SELL", "pnl": None},  # still open, excluded
+        ]
+
+        result = compute_phase_returns_strategy(trades, account=1000.0)
+
+        assert result["BULLISH"] == pytest.approx(30.0 / 1000.0 * 100)
+        assert result["BEARISH"] == pytest.approx(30.0 / 1000.0 * 100)
+
+    def test_no_trades_returns_zero_for_both_phases(self):
+        result = compute_phase_returns_strategy([], account=1000.0)
+
+        assert result == {"BULLISH": 0.0, "BEARISH": 0.0}
+
 
 class TestMainBenchmarkIntegration:
     def test_per_symbol_benchmark_passed_to_log_report(self, monkeypatch):
@@ -643,3 +828,31 @@ class TestMainBenchmarkIntegration:
         combined_benchmark = log_report_mock.call_args_list[-1].kwargs["benchmark"]
         assert combined_benchmark is not None
         assert "return_pct" in combined_benchmark
+
+    def test_per_symbol_benchmark_includes_phase_returns(self, monkeypatch):
+        closes = [100.0 + i for i in range(10)]
+        df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+
+        main(["BTCUSDT"], days=10, refresh=False)
+
+        benchmark = log_report_mock.call_args_list[0].kwargs["benchmark"]
+        assert set(benchmark["phase_returns"]) == {"BULLISH", "BEARISH", "NEUTRAL"}
+        assert benchmark["strategy_phase_returns"] == {"BULLISH": 0.0, "BEARISH": 0.0}
+
+    def test_combined_benchmark_includes_phase_returns(self, monkeypatch):
+        closes = [100.0 + i for i in range(10)]
+        df = _ohlc_df(opens=closes, highs=[c * 1.01 for c in closes], lows=[c * 0.99 for c in closes], closes=closes)
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        combined_benchmark = log_report_mock.call_args_list[-1].kwargs["benchmark"]
+        assert set(combined_benchmark["phase_returns"]) == {"BULLISH", "BEARISH", "NEUTRAL"}
+        assert combined_benchmark["strategy_phase_returns"] == {"BULLISH": 0.0, "BEARISH": 0.0}

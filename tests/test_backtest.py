@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from backtest import load_history, main
+from config import ACCOUNT_SIZE
 from ingestion.base import OHLCV_COLUMNS
 from ingestion.raw_store import MissingDataError
 
@@ -328,3 +329,61 @@ class TestIncompleteReporting:
             main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
         assert "INCOMPLETE RESULT" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Combined-report account size: each symbol trades its own ACCOUNT_SIZE-sized
+# sleeve (see run_backtest/calculate_position_size) — there's no shared
+# capital across symbols, so the combined report's denominator must scale
+# with how many symbols actually contributed trades. A fixed ACCOUNT_SIZE
+# here silently inflates "return on account" with every symbol added to the
+# run (regression: reported +86.1% on 5 symbols was actually +17.2% on the
+# real $5000 of capital in play — see NOTES.md).
+# ---------------------------------------------------------------------------
+
+class TestCombinedAccountSize:
+    def test_scales_with_symbol_count_when_nothing_skipped(self, monkeypatch):
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
+
+        combined_account = log_report_mock.call_args_list[-1][0][2]
+        assert combined_account == 3 * ACCOUNT_SIZE
+
+    def test_excludes_skipped_symbols_from_combined_account_size(self, monkeypatch):
+        def fake_load_history(symbol, interval, start, end, store, refresh, source=None):
+            if symbol == "BTCUSDT":
+                raise MissingDataError("missing BTCUSDT")
+            return "df"
+
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.load_history", fake_load_history)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        # Only ETHUSDT actually ran — its sleeve is the only capital in play.
+        combined_account = log_report_mock.call_args_list[-1][0][2]
+        assert combined_account == 1 * ACCOUNT_SIZE
+
+    def test_per_symbol_reports_still_use_plain_account_size(self, monkeypatch):
+        # The combined-report fix must not leak into individual per-symbol
+        # reports — each of those really is one ACCOUNT_SIZE-sized sleeve.
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: "df")
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+        monkeypatch.setattr("backtest.RawStore", MagicMock())
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        btc_account = log_report_mock.call_args_list[0][0][2]
+        eth_account = log_report_mock.call_args_list[1][0][2]
+        assert btc_account == ACCOUNT_SIZE
+        assert eth_account == ACCOUNT_SIZE

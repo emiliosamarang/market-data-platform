@@ -297,10 +297,16 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
         all_trades.extend(trades)
 
     if len(symbols) > 1:
+        successful = len(symbols) - len(skipped)
         label = "ALL SYMBOLS COMBINED"
         if skipped:
-            label += f" — INCOMPLETE ({len(symbols) - len(skipped)}/{len(symbols)} symbols)"
-        log_report(label, all_trades, ACCOUNT_SIZE)
+            label += f" — INCOMPLETE ({successful}/{len(symbols)} symbols)"
+        # Each symbol trades against its own ACCOUNT_SIZE-sized sleeve (see
+        # run_backtest/calculate_position_size) — there's no shared capital
+        # or position cap across symbols. The combined account size must
+        # scale accordingly, or "return on account" silently inflates with
+        # every symbol added to the run.
+        log_report(label, all_trades, successful * ACCOUNT_SIZE)
 
     if skipped:
         log_skipped_symbols(skipped, len(symbols))

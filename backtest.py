@@ -178,10 +178,96 @@ def run_backtest(symbol: str, df_4h, df_1h) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Buy-and-hold benchmark
+# ---------------------------------------------------------------------------
+
+def compute_buy_and_hold(df_1h: pd.DataFrame, account: float) -> dict:
+    """Benchmark a symbol against simply holding it for the backtest period.
+
+    Buy `account` dollars' worth at the first candle's open, sell at the
+    last candle's close — same full-ACCOUNT_SIZE capital base as a
+    strategy sleeve (see the account-size fix in main()), one round-trip
+    fee at the strategy's own FEE_RATE. Returns the equity curve too, so
+    per-symbol drawdowns can be summed into a genuine combined drawdown
+    rather than averaged.
+    """
+    if df_1h.empty:
+        raise ValueError("Cannot compute buy-and-hold on an empty DataFrame")
+
+    entry = df_1h["Open"].iloc[0]
+    exit_price = df_1h["Close"].iloc[-1]
+    size = account / entry
+
+    gross_pnl = (exit_price - entry) * size
+    fee = (entry + exit_price) * size * FEE_RATE
+    net_pnl = gross_pnl - fee
+    return_pct = net_pnl / account * 100
+
+    # Mark-to-market equity path (fees only realized at the two endpoints,
+    # same treatment as the strategy's own per-trade PnL) — needed to catch
+    # an interim dip that entry-vs-exit alone would miss.
+    equity_curve = account + (df_1h["Close"] - entry) * size
+    peak = equity_curve.cummax()
+    drawdown_pct = (peak - equity_curve) / peak * 100
+    max_drawdown_pct = drawdown_pct.max()
+
+    return {
+        "entry": entry,
+        "exit": exit_price,
+        "net_pnl": net_pnl,
+        "return_pct": return_pct,
+        "max_drawdown_pct": max_drawdown_pct,
+        "equity_curve": equity_curve,
+    }
+
+
+def combine_buy_and_hold(results: list[dict], account_per_symbol: float) -> dict:
+    """Combine per-symbol buy-and-hold results onto the same capital base
+    as the combined strategy report: successful_symbols * account_per_symbol
+    (see the Modell-A account-size fix). Drawdown is computed from the
+    *summed* equity curve, not averaged per-symbol drawdowns — a dip in one
+    symbol while others hold steady should show up proportionally, not
+    equally, in the combined figure.
+    """
+    if not results:
+        return {"net_pnl": 0.0, "return_pct": 0.0, "max_drawdown_pct": 0.0}
+
+    total_account = account_per_symbol * len(results)
+    total_net_pnl = sum(r["net_pnl"] for r in results)
+    return_pct = total_net_pnl / total_account * 100
+
+    curves = [r["equity_curve"] for r in results]
+    combined_index = curves[0].index
+    for curve in curves[1:]:
+        combined_index = combined_index.union(curve.index)
+    aligned = [curve.reindex(combined_index).ffill().bfill() for curve in curves]
+    combined_equity = sum(aligned)
+    peak = combined_equity.cummax()
+    drawdown_pct = (peak - combined_equity) / peak * 100
+    max_drawdown_pct = drawdown_pct.max()
+
+    return {
+        "net_pnl": total_net_pnl,
+        "return_pct": return_pct,
+        "max_drawdown_pct": max_drawdown_pct,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
-def log_report(label: str, trades: list[dict], account: float) -> None:
+def _log_benchmark_comparison(total_pnl: float, account: float, benchmark: dict) -> None:
+    strategy_return_pct = total_pnl / account * 100
+    diff_pct = strategy_return_pct - benchmark["return_pct"]
+    log.info("  ---")
+    log.info("  Buy & Hold return:    %+.1f%%", benchmark["return_pct"])
+    log.info("  Strategy return:      %+.1f%%", strategy_return_pct)
+    log.info("  Strategy vs B&H:      %+.1f pp", diff_pct)
+    log.info("  Buy & Hold max DD:    %.1f%%", benchmark["max_drawdown_pct"])
+
+
+def log_report(label: str, trades: list[dict], account: float, benchmark: dict | None = None) -> None:
     closed = [t for t in trades if t.get("pnl") is not None]
     sep = "=" * 52
     log.info(sep)
@@ -190,6 +276,8 @@ def log_report(label: str, trades: list[dict], account: float) -> None:
 
     if not closed:
         log.warning("  No closed trades.")
+        if benchmark is not None:
+            _log_benchmark_comparison(0.0, account, benchmark)
         return
 
     pnls = [t["pnl"] for t in closed]
@@ -244,6 +332,9 @@ def log_report(label: str, trades: list[dict], account: float) -> None:
     log.info("  Max consec. losses:  %d", max_consec_losses)
     log.info("  Final equity:        $%.2f", equity_curve[-1])
 
+    if benchmark is not None:
+        _log_benchmark_comparison(total_pnl, account, benchmark)
+
 
 def log_skipped_symbols(skipped: list[tuple[str, str]], total: int) -> None:
     """Prominent, hard-to-miss banner listing symbols excluded from the result.
@@ -274,6 +365,7 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
     """
     all_trades: list[dict] = []
     skipped: list[tuple[str, str]] = []
+    bh_results: list[dict] = []
     store = RawStore(base_dir=RAW_DATA_DIR)
     source = BinanceSource() if refresh else None
     end = datetime.now(timezone.utc)
@@ -293,7 +385,10 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
             continue
 
         trades = run_backtest(symbol, df_4h, df_1h)
-        log_report(symbol, trades, ACCOUNT_SIZE)
+        bh = compute_buy_and_hold(df_1h, ACCOUNT_SIZE)
+        bh["symbol"] = symbol
+        bh_results.append(bh)
+        log_report(symbol, trades, ACCOUNT_SIZE, benchmark=bh)
         all_trades.extend(trades)
 
     if len(symbols) > 1:
@@ -306,7 +401,8 @@ def main(symbols: list[str], days: int, refresh: bool) -> int:
         # or position cap across symbols. The combined account size must
         # scale accordingly, or "return on account" silently inflates with
         # every symbol added to the run.
-        log_report(label, all_trades, successful * ACCOUNT_SIZE)
+        combined_bh = combine_buy_and_hold(bh_results, ACCOUNT_SIZE) if bh_results else None
+        log_report(label, all_trades, successful * ACCOUNT_SIZE, benchmark=combined_bh)
 
     if skipped:
         log_skipped_symbols(skipped, len(symbols))

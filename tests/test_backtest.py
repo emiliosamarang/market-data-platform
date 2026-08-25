@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from backtest import load_history, main
+from backtest import FEE_RATE, combine_buy_and_hold, compute_buy_and_hold, load_history, log_report, main
 from config import ACCOUNT_SIZE
 from ingestion.base import OHLCV_COLUMNS
 from ingestion.raw_store import MissingDataError
@@ -131,6 +131,11 @@ class TestMain:
         monkeypatch.setattr("backtest.run_backtest", run_backtest_mock)
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -146,6 +151,11 @@ class TestMain:
         log_report_mock = MagicMock()
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         result = main(["BTCUSDT"], days=10, refresh=False)
 
@@ -158,6 +168,11 @@ class TestMain:
         log_report_mock = MagicMock()
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -177,6 +192,11 @@ class TestMain:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.BinanceSource", fake_source_cls)
 
         main(["BTCUSDT"], days=10, refresh=True)
@@ -196,6 +216,11 @@ class TestMain:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
         monkeypatch.setattr("backtest.BinanceSource", fake_source_cls)
 
         main(["BTCUSDT"], days=10, refresh=False)
@@ -221,6 +246,11 @@ class TestIncompleteReporting:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -234,6 +264,11 @@ class TestIncompleteReporting:
         log_report_mock = MagicMock()
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -245,6 +280,11 @@ class TestIncompleteReporting:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 0
 
@@ -258,6 +298,11 @@ class TestIncompleteReporting:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         assert main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False) == 1
 
@@ -272,6 +317,11 @@ class TestIncompleteReporting:
         log_report_mock = MagicMock()
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         result = main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -289,6 +339,11 @@ class TestIncompleteReporting:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             result = main(["BTCUSDT"], days=10, refresh=False)
@@ -309,6 +364,11 @@ class TestIncompleteReporting:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             result = main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
@@ -324,6 +384,11 @@ class TestIncompleteReporting:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", MagicMock())
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         with caplog.at_level(logging.ERROR, logger="backtest"):
             main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
@@ -348,6 +413,11 @@ class TestCombinedAccountSize:
         log_report_mock = MagicMock()
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         main(["BTCUSDT", "ETHUSDT", "SOLUSDT"], days=10, refresh=False)
 
@@ -365,6 +435,11 @@ class TestCombinedAccountSize:
         monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -380,6 +455,11 @@ class TestCombinedAccountSize:
         log_report_mock = MagicMock()
         monkeypatch.setattr("backtest.log_report", log_report_mock)
         monkeypatch.setattr("backtest.RawStore", MagicMock())
+        # These tests exercise skip/reporting logic, not the benchmark
+        # itself — load_history is stubbed with a plain "df" placeholder,
+        # which real compute_buy_and_hold can't operate on.
+        monkeypatch.setattr("backtest.compute_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
+        monkeypatch.setattr("backtest.combine_buy_and_hold", lambda *a, **k: {"return_pct": 0.0, "max_drawdown_pct": 0.0, "net_pnl": 0.0})
 
         main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
 
@@ -387,3 +467,179 @@ class TestCombinedAccountSize:
         eth_account = log_report_mock.call_args_list[1][0][2]
         assert btc_account == ACCOUNT_SIZE
         assert eth_account == ACCOUNT_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Buy-and-hold benchmark
+# ---------------------------------------------------------------------------
+
+def _ohlc_df(opens, highs, lows, closes, start="2024-01-01T00:00:00Z"):
+    """bot.py-shape frame (capitalized OHLC columns, DatetimeIndex) — the
+    shape compute_buy_and_hold/run_backtest actually operate on."""
+    index = pd.date_range(start, periods=len(closes), freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {"Open": opens, "High": highs, "Low": lows, "Close": closes}, index=index
+    )
+
+
+class TestComputeBuyAndHold:
+    def test_known_return_matches_hand_calculation(self):
+        df = _ohlc_df(
+            opens=[100.0, 101.0, 99.0, 110.0],
+            highs=[101.0, 102.0, 100.0, 111.0],
+            lows=[99.0, 100.0, 98.0, 109.0],
+            closes=[100.5, 100.0, 98.5, 110.0],
+        )
+        account = 1000.0
+
+        result = compute_buy_and_hold(df, account)
+
+        entry, exit_price = 100.0, 110.0  # first Open, last Close
+        size = account / entry
+        gross = (exit_price - entry) * size
+        fee = (entry + exit_price) * size * FEE_RATE
+        expected_net = gross - fee
+        expected_return_pct = expected_net / account * 100
+
+        assert result["entry"] == entry
+        assert result["exit"] == exit_price
+        assert result["net_pnl"] == pytest.approx(expected_net)
+        assert result["return_pct"] == pytest.approx(expected_return_pct)
+
+    def test_single_candle_period(self):
+        df = _ohlc_df(opens=[100.0], highs=[101.0], lows=[99.0], closes=[100.5])
+
+        result = compute_buy_and_hold(df, 1000.0)
+
+        entry, exit_price = 100.0, 100.5
+        size = 1000.0 / entry
+        expected_net = (exit_price - entry) * size - (entry + exit_price) * size * FEE_RATE
+
+        assert result["net_pnl"] == pytest.approx(expected_net)
+        assert result["max_drawdown_pct"] == pytest.approx(0.0)
+
+    def test_falling_market_produces_negative_return_and_drawdown(self):
+        df = _ohlc_df(
+            opens=[100.0, 90.0, 80.0, 70.0],
+            highs=[101.0, 91.0, 81.0, 71.0],
+            lows=[99.0, 89.0, 79.0, 69.0],
+            closes=[95.0, 85.0, 75.0, 65.0],
+        )
+
+        result = compute_buy_and_hold(df, 1000.0)
+
+        assert result["return_pct"] < 0
+        assert result["max_drawdown_pct"] > 0
+
+    def test_empty_dataframe_raises(self):
+        df = pd.DataFrame(columns=["Open", "High", "Low", "Close"])
+
+        with pytest.raises(ValueError):
+            compute_buy_and_hold(df, 1000.0)
+
+    def test_drawdown_reflects_interim_dip_not_just_endpoints(self):
+        # Price dips hard mid-period then recovers above entry — a naive
+        # entry-vs-exit comparison would show 0 drawdown, which would be wrong.
+        df = _ohlc_df(
+            opens=[100.0, 100.0, 100.0, 100.0],
+            highs=[101.0, 101.0, 101.0, 121.0],
+            lows=[99.0, 49.0, 99.0, 119.0],
+            closes=[100.0, 50.0, 100.0, 120.0],
+        )
+
+        result = compute_buy_and_hold(df, 1000.0)
+
+        assert result["return_pct"] > 0  # ended up net positive
+        assert result["max_drawdown_pct"] == pytest.approx(50.0)  # but the dip must show up
+
+
+class TestCombineBuyAndHold:
+    def test_combines_pnl_and_scales_by_symbol_count(self):
+        idx = pd.date_range("2024-01-01", periods=2, freq="1h", tz="UTC")
+        results = [
+            {"net_pnl": 100.0, "equity_curve": pd.Series([1000.0, 1010.0], index=idx)},
+            {"net_pnl": -50.0, "equity_curve": pd.Series([1000.0, 990.0], index=idx)},
+        ]
+
+        combined = combine_buy_and_hold(results, account_per_symbol=1000.0)
+
+        assert combined["net_pnl"] == pytest.approx(50.0)
+        assert combined["return_pct"] == pytest.approx(50.0 / 2000.0 * 100)
+
+    def test_empty_results_returns_zeroed_dict(self):
+        combined = combine_buy_and_hold([], account_per_symbol=1000.0)
+
+        assert combined == {"net_pnl": 0.0, "return_pct": 0.0, "max_drawdown_pct": 0.0}
+
+    def test_combined_drawdown_from_summed_equity_not_averaged(self):
+        idx = pd.date_range("2024-01-01", periods=3, freq="1h", tz="UTC")
+        # A dips hard mid-period while B stays flat.
+        results = [
+            {"net_pnl": 0.0, "equity_curve": pd.Series([1000.0, 500.0, 1000.0], index=idx)},
+            {"net_pnl": 0.0, "equity_curve": pd.Series([1000.0, 1000.0, 1000.0], index=idx)},
+        ]
+
+        combined = combine_buy_and_hold(results, account_per_symbol=1000.0)
+
+        # combined equity: [2000, 1500, 2000] -> dd = 500/2000 = 25%
+        assert combined["max_drawdown_pct"] == pytest.approx(25.0)
+
+
+class TestLogReportBenchmark:
+    def test_logs_benchmark_lines_when_provided(self, caplog):
+        trades = [{"pnl": 50.0, "exit_reason": "TP"}]
+        benchmark = {"return_pct": 10.0, "max_drawdown_pct": 5.0}
+
+        with caplog.at_level(logging.INFO, logger="backtest"):
+            log_report("BTCUSDT", trades, 1000.0, benchmark=benchmark)
+
+        assert "Buy & Hold return:    +10.0%" in caplog.text
+        assert "Strategy return:      +5.0%" in caplog.text
+        assert "Strategy vs B&H:      -5.0 pp" in caplog.text
+        assert "Buy & Hold max DD:    5.0%" in caplog.text
+
+    def test_no_benchmark_lines_when_not_provided(self, caplog):
+        trades = [{"pnl": 50.0, "exit_reason": "TP"}]
+
+        with caplog.at_level(logging.INFO, logger="backtest"):
+            log_report("BTCUSDT", trades, 1000.0)
+
+        assert "Buy & Hold" not in caplog.text
+
+    def test_benchmark_logged_even_with_no_closed_trades(self, caplog):
+        benchmark = {"return_pct": 10.0, "max_drawdown_pct": 5.0}
+
+        with caplog.at_level(logging.INFO, logger="backtest"):
+            log_report("BTCUSDT", [], 1000.0, benchmark=benchmark)
+
+        assert "Buy & Hold return:    +10.0%" in caplog.text
+        assert "Strategy return:      +0.0%" in caplog.text
+
+
+class TestMainBenchmarkIntegration:
+    def test_per_symbol_benchmark_passed_to_log_report(self, monkeypatch):
+        df = _ohlc_df(opens=[100.0, 100.0], highs=[101.0, 101.0], lows=[99.0, 99.0], closes=[100.0, 110.0])
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+
+        main(["BTCUSDT"], days=10, refresh=False)
+
+        benchmark = log_report_mock.call_args_list[0].kwargs["benchmark"]
+        assert benchmark["symbol"] == "BTCUSDT"
+        assert benchmark["entry"] == 100.0
+        assert benchmark["exit"] == 110.0
+
+    def test_combined_benchmark_passed_for_multi_symbol_run(self, monkeypatch):
+        df = _ohlc_df(opens=[100.0, 100.0], highs=[101.0, 101.0], lows=[99.0, 99.0], closes=[100.0, 110.0])
+        monkeypatch.setattr("backtest.load_history", lambda *a, **k: df)
+        monkeypatch.setattr("backtest.run_backtest", MagicMock(return_value=[]))
+        log_report_mock = MagicMock()
+        monkeypatch.setattr("backtest.log_report", log_report_mock)
+
+        main(["BTCUSDT", "ETHUSDT"], days=10, refresh=False)
+
+        combined_benchmark = log_report_mock.call_args_list[-1].kwargs["benchmark"]
+        assert combined_benchmark is not None
+        assert "return_pct" in combined_benchmark

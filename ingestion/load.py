@@ -4,6 +4,7 @@ Usage:
     python -m ingestion.load --symbol BTCUSDT ETHUSDT --interval 1h
     python -m ingestion.load --symbol BTCUSDT --interval 4h --start 2024-01-01 --end 2024-06-01
     python -m ingestion.load --symbol BTCUSDT --interval 1h --dry-run
+    python -m ingestion.load --source kraken --interval 1h
 """
 import argparse
 import logging
@@ -12,9 +13,18 @@ from datetime import datetime, timedelta, timezone
 from config import INGESTION_ASSET_CLASS, INGESTION_SYMBOLS, RAW_DATA_DIR, setup_logging
 from ingestion.base import MarketDataSource
 from ingestion.binance_source import BinanceSource
+from ingestion.kraken_source import KrakenSource
 from ingestion.raw_store import RawStore
 
 log = logging.getLogger("ingestion.load")
+
+# Maps --source to its MarketDataSource implementation. Each source writes
+# under its own `source` partition (see RawStore) — adding a new source
+# here doesn't touch any other source's data.
+SOURCE_REGISTRY: dict[str, type[MarketDataSource]] = {
+    "binance": BinanceSource,
+    "kraken": KrakenSource,
+}
 
 
 def _default_start() -> datetime:
@@ -52,6 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Fetch and show what would be written, without writing anything.",
+    )
+    parser.add_argument(
+        "--source", choices=sorted(SOURCE_REGISTRY), default="binance",
+        help="Data source to fetch from (default: binance)",
     )
     return parser
 
@@ -95,7 +109,8 @@ def run(
 def main() -> None:
     setup_logging()
     args = build_parser().parse_args()
-    run(args.symbols, args.interval, args.start, args.end, args.dry_run)
+    source = SOURCE_REGISTRY[args.source]()
+    run(args.symbols, args.interval, args.start, args.end, args.dry_run, source=source)
 
 
 if __name__ == "__main__":

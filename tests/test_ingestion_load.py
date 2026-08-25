@@ -6,7 +6,9 @@ import pytest
 
 from config import INGESTION_SYMBOLS
 from ingestion.base import OHLCV_COLUMNS
-from ingestion.load import _default_start, build_parser, run
+from ingestion.binance_source import BinanceSource
+from ingestion.kraken_source import KrakenSource
+from ingestion.load import _default_start, build_parser, main, run
 
 
 def _df(symbol="BTCUSDT", interval="1h", n=2, start="2024-01-01T00:00:00Z"):
@@ -71,6 +73,18 @@ class TestArgParsing:
     def test_invalid_date_raises_system_exit(self):
         with pytest.raises(SystemExit):
             build_parser().parse_args(["--interval", "1h", "--start", "not-a-date"])
+
+    def test_source_defaults_to_binance(self):
+        args = build_parser().parse_args(["--interval", "1h"])
+        assert args.source == "binance"
+
+    def test_source_can_be_set_to_kraken(self):
+        args = build_parser().parse_args(["--interval", "1h", "--source", "kraken"])
+        assert args.source == "kraken"
+
+    def test_unknown_source_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["--interval", "1h", "--source", "coinbase"])
 
 
 # ---------------------------------------------------------------------------
@@ -177,3 +191,29 @@ class TestRun:
 
         fake_source_cls.assert_called_once_with()
         fake_store_cls.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# main() — source registry wiring
+# ---------------------------------------------------------------------------
+
+class TestMainSourceSelection:
+    def test_default_source_is_binance(self, monkeypatch):
+        run_mock = MagicMock()
+        monkeypatch.setattr("ingestion.load.run", run_mock)
+        monkeypatch.setattr("sys.argv", ["prog", "--interval", "1h"])
+
+        main()
+
+        used_source = run_mock.call_args.kwargs["source"]
+        assert isinstance(used_source, BinanceSource)
+
+    def test_source_flag_selects_kraken(self, monkeypatch):
+        run_mock = MagicMock()
+        monkeypatch.setattr("ingestion.load.run", run_mock)
+        monkeypatch.setattr("sys.argv", ["prog", "--interval", "1h", "--source", "kraken"])
+
+        main()
+
+        used_source = run_mock.call_args.kwargs["source"]
+        assert isinstance(used_source, KrakenSource)

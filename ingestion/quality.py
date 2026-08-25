@@ -3,6 +3,7 @@
 Usage:
     python -m ingestion.quality --symbol BTCUSDT --interval 1h
     python -m ingestion.quality --symbol BTCUSDT ETHUSDT --interval 1h --start 2024-01-01 --end 2024-06-01
+    python -m ingestion.quality --interval 1h --source binance --compare-source kraken
 
 Runs six checks per symbol against the raw Parquet layer (see RawStore):
 gaps in the time grid, duplicate rows, OHLC plausibility, zero-volume
@@ -12,6 +13,11 @@ backtest.py's INCOMPLETE-result convention; WARNING-severity checks are
 reported but never block. Every run writes its results to a report file
 under data/quality/, one row per check, shaped so it can later be loaded
 straight into a fact_quality_check table.
+
+Passing --compare-source additionally runs a two-source cross-check per
+symbol (see check_cross_source): candle coverage and close-price agreement
+between --source and --compare-source, restricted to the window where both
+actually have data.
 """
 import argparse
 import logging
@@ -50,8 +56,14 @@ OUTLIER_MAD_SCALE = 0.6745  # scales MAD to be comparable to a normal std-dev
 # wall-clock now — a historical backtest range isn't supposed to be fresh.
 FRESHNESS_INTERVAL_MULTIPLE = 2
 
+# Cross-source close-price check: different exchanges are different markets
+# with their own liquidity, so small deviations are normal, not a fault —
+# WARNING only, never blocks. 0.5% is comfortably above typical cross-venue
+# noise but well below what a real feed problem would produce.
+CROSS_SOURCE_CLOSE_THRESHOLD = 0.005
+
 REPORT_COLUMNS = [
-    "run_ts", "symbol", "interval", "check_name",
+    "run_ts", "symbol", "interval", "source", "check_name",
     "severity", "passed", "violation_count", "details",
 ]
 
@@ -154,6 +166,68 @@ def _mad(x: np.ndarray) -> float:
     return float(np.median(np.abs(x - np.median(x))))
 
 
+def check_cross_source(
+    df_a: pd.DataFrame, df_b: pd.DataFrame, source_a: str, source_b: str
+) -> tuple[CheckResult, CheckResult]:
+    """Compare two sources' candles for the same symbol/interval.
+
+    Only compares within the date range where both sources actually have
+    data. Kraken's public OHLC endpoint, for example, only ever covers the
+    last ~30-120 days — the rest of Binance's multi-year history has
+    nothing on the Kraken side to compare against, and that's not a
+    coverage problem, just outside Kraken's reach. Returns two independent
+    findings, both WARNING (different venues can legitimately disagree by
+    small amounts — this is a sanity check, not a hard requirement):
+
+    - "cross_source_gaps": a candle present in one source but not the
+      other within the shared window. This is a coverage gap, not a price
+      disagreement, and is reported even if every overlapping candle's
+      price matches exactly.
+    - "cross_source_price": relative deviation between close prices, only
+      over candles present in both sources.
+    """
+    if df_a.empty or df_b.empty:
+        detail = "no overlapping data (one or both sources empty for this range)"
+        return (
+            CheckResult("cross_source_gaps", WARNING, True, 0, detail),
+            CheckResult("cross_source_price", WARNING, True, 0, detail),
+        )
+
+    range_start = max(df_a["timestamp"].min(), df_b["timestamp"].min())
+    range_end = min(df_a["timestamp"].max(), df_b["timestamp"].max())
+    if range_start > range_end:
+        detail = "sources' date ranges don't overlap"
+        return (
+            CheckResult("cross_source_gaps", WARNING, True, 0, detail),
+            CheckResult("cross_source_price", WARNING, True, 0, detail),
+        )
+
+    a = df_a[(df_a["timestamp"] >= range_start) & (df_a["timestamp"] <= range_end)]
+    b = df_b[(df_b["timestamp"] >= range_start) & (df_b["timestamp"] <= range_end)]
+
+    ts_a, ts_b = set(a["timestamp"]), set(b["timestamp"])
+    only_a = sorted(ts_a - ts_b)
+    only_b = sorted(ts_b - ts_a)
+    gap_count = len(only_a) + len(only_b)
+    gap_result = CheckResult(
+        "cross_source_gaps", WARNING, passed=gap_count == 0, violation_count=gap_count,
+        details=_preview(
+            [f"{source_a} only: {ts.isoformat()}" for ts in only_a]
+            + [f"{source_b} only: {ts.isoformat()}" for ts in only_b]
+        ),
+    )
+
+    merged = a.merge(b, on="timestamp", suffixes=(f"_{source_a}", f"_{source_b}"))
+    rel_dev = (merged[f"close_{source_a}"] - merged[f"close_{source_b}"]).abs() / merged[f"close_{source_a}"]
+    flagged = rel_dev > CROSS_SOURCE_CLOSE_THRESHOLD
+    price_result = CheckResult(
+        "cross_source_price", WARNING, passed=not flagged.any(), violation_count=int(flagged.sum()),
+        details=_preview(ts.isoformat() for ts in merged.loc[flagged, "timestamp"]),
+    )
+
+    return gap_result, price_result
+
+
 def _preview(items) -> str:
     items = list(items)
     if not items:
@@ -168,9 +242,12 @@ def _preview(items) -> str:
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def run_checks(symbol: str, interval: str, start: datetime, end: datetime, store: RawStore) -> list[CheckResult]:
-    raw_df = store.load_range(INGESTION_ASSET_CLASS, INGESTION_SOURCE, symbol, interval, start, end, dedupe=False)
-    df = store.load_range(INGESTION_ASSET_CLASS, INGESTION_SOURCE, symbol, interval, start, end, dedupe=True)
+def run_checks(
+    symbol: str, interval: str, start: datetime, end: datetime, store: RawStore,
+    source: str = INGESTION_SOURCE,
+) -> list[CheckResult]:
+    raw_df = store.load_range(INGESTION_ASSET_CLASS, source, symbol, interval, start, end, dedupe=False)
+    df = store.load_range(INGESTION_ASSET_CLASS, source, symbol, interval, start, end, dedupe=True)
 
     results = [
         check_gaps(df, store, interval, start, end),
@@ -187,10 +264,24 @@ def _default_start() -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=30)
 
 
-def _log_result(symbol: str, interval: str, result: CheckResult) -> None:
+def _log_result(symbol: str, interval: str, source: str, result: CheckResult) -> None:
     log_fn = log.info if result.passed else (log.error if result.severity == ERROR else log.warning)
     status = "OK" if result.passed else f"FAILED ({result.violation_count})"
-    log_fn("%s %s | %-18s %-6s | %s", symbol, interval, result.check_name, status, result.details)
+    log_fn("%s %s %s | %-18s %-6s | %s", symbol, interval, source, result.check_name, status, result.details)
+
+
+def _report_row(run_ts: datetime, symbol: str, interval: str, source: str, result: CheckResult) -> dict:
+    return {
+        "run_ts": run_ts,
+        "symbol": symbol,
+        "interval": interval,
+        "source": source,
+        "check_name": result.check_name,
+        "severity": result.severity,
+        "passed": result.passed,
+        "violation_count": result.violation_count,
+        "details": result.details,
+    }
 
 
 def run(
@@ -200,6 +291,8 @@ def run(
     end: datetime | None,
     store: RawStore | None = None,
     report_dir: str | Path | None = None,
+    source: str = INGESTION_SOURCE,
+    compare_source: str | None = None,
 ) -> tuple[pd.DataFrame, int]:
     start = start or _default_start()
     end = end or datetime.now(timezone.utc)
@@ -209,18 +302,17 @@ def run(
 
     rows = []
     for symbol in symbols:
-        for result in run_checks(symbol, interval, start, end, store):
-            _log_result(symbol, interval, result)
-            rows.append({
-                "run_ts": run_ts,
-                "symbol": symbol,
-                "interval": interval,
-                "check_name": result.check_name,
-                "severity": result.severity,
-                "passed": result.passed,
-                "violation_count": result.violation_count,
-                "details": result.details,
-            })
+        for result in run_checks(symbol, interval, start, end, store, source=source):
+            _log_result(symbol, interval, source, result)
+            rows.append(_report_row(run_ts, symbol, interval, source, result))
+
+        if compare_source:
+            df_a = store.load_range(INGESTION_ASSET_CLASS, source, symbol, interval, start, end, dedupe=True)
+            df_b = store.load_range(INGESTION_ASSET_CLASS, compare_source, symbol, interval, start, end, dedupe=True)
+            combined_label = f"{source}+{compare_source}"
+            for result in check_cross_source(df_a, df_b, source, compare_source):
+                _log_result(symbol, interval, combined_label, result)
+                rows.append(_report_row(run_ts, symbol, interval, combined_label, result))
 
     report_df = pd.DataFrame(rows, columns=REPORT_COLUMNS)
     path = write_report(report_df, report_dir, run_ts)
@@ -263,6 +355,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--end", type=_parse_date, default=None,
         help="End date/time (UTC, ISO format). Default: now.",
     )
+    parser.add_argument(
+        "--source", default=INGESTION_SOURCE,
+        help="Source partition to check (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--compare-source", dest="compare_source", default=None,
+        help="If set, also cross-check --source against this source (e.g. kraken)",
+    )
     return parser
 
 
@@ -276,7 +376,10 @@ def _parse_date(value: str) -> datetime:
 def main() -> int:
     setup_logging()
     args = build_parser().parse_args()
-    _, exit_code = run(args.symbols, args.interval, args.start, args.end)
+    _, exit_code = run(
+        args.symbols, args.interval, args.start, args.end,
+        source=args.source, compare_source=args.compare_source,
+    )
     return exit_code
 
 

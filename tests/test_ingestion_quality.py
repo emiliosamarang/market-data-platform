@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from config import INGESTION_SYMBOLS
+from config import INGESTION_SOURCE, INGESTION_SYMBOLS
 from ingestion.base import OHLCV_COLUMNS
 from ingestion.quality import (
     ERROR,
@@ -12,6 +12,7 @@ from ingestion.quality import (
     REPORT_COLUMNS,
     WARNING,
     build_parser,
+    check_cross_source,
     check_duplicates,
     check_freshness,
     check_gaps,
@@ -260,6 +261,88 @@ class TestCheckOutliers:
 
 
 # ---------------------------------------------------------------------------
+# check_cross_source
+# ---------------------------------------------------------------------------
+
+class TestCheckCrossSource:
+    def test_one_source_empty_passes(self):
+        df_a = _rows(["2024-01-01T00:00:00Z"], source="binance")
+        df_b = _rows([], source="kraken")
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+
+        assert gaps.passed and gaps.violation_count == 0
+        assert price.passed and price.violation_count == 0
+        assert gaps.severity == WARNING
+        assert price.severity == WARNING
+
+    def test_non_overlapping_ranges_pass(self):
+        df_a = _rows(["2024-01-01T00:00:00Z"], source="binance")
+        df_b = _rows(["2024-02-01T00:00:00Z"], source="kraken")
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+
+        assert gaps.passed
+        assert price.passed
+
+    def test_matching_prices_within_threshold_pass(self):
+        ts = ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"]
+        df_a = _rows(ts, source="binance", price=100.0)
+        df_b = _rows(ts, source="kraken", price=100.3)  # ~0.3% off on close
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+
+        assert gaps.passed
+        assert price.passed
+
+    def test_price_deviation_beyond_threshold_flagged(self):
+        ts = ["2024-01-01T00:00:00Z"]
+        df_a = _rows(ts, source="binance", price=100.0)  # close = 101.0
+        df_b = _rows(ts, source="kraken", price=90.0)    # close = 91.0, ~10% off
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+
+        assert gaps.passed  # same timestamp present in both -> not a gap
+        assert not price.passed
+        assert price.violation_count == 1
+
+    def test_candle_only_in_one_source_within_overlap_is_a_gap(self):
+        # kraken's own span reaches 00:00-02:00 (same as binance's), it just
+        # has a hole at 01:00 — a genuine gap, not a coverage-boundary
+        # difference (see test_gap_check_ignores_candles_outside_overlap_window
+        # below for that distinction).
+        df_a = _rows(
+            ["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z", "2024-01-01T02:00:00Z"],
+            source="binance",
+        )
+        df_b = _rows(
+            ["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"],
+            source="kraken",
+        )
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+
+        assert not gaps.passed
+        assert gaps.violation_count == 1
+        assert "binance only" in gaps.details
+
+    def test_gap_check_ignores_candles_outside_overlap_window(self):
+        # binance has a long history; kraken only covers the tail. Earlier
+        # binance-only candles must not be flagged as gaps — they're
+        # outside kraken's reach by design, not missing data.
+        df_a = _rows(
+            ["2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", "2024-01-03T00:00:00Z"],
+            source="binance",
+        )
+        df_b = _rows(["2024-01-03T00:00:00Z"], source="kraken")
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+
+        assert gaps.passed
+        assert gaps.violation_count == 0
+
+
+# ---------------------------------------------------------------------------
 # run_checks / run — integration through RawStore
 # ---------------------------------------------------------------------------
 
@@ -350,6 +433,45 @@ class TestRun:
         assert exit_code == 0
 
 
+class TestRunCrossSource:
+    def test_compare_source_adds_cross_source_rows(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"], source="binance"),
+            asset_class="crypto",
+        )
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"], source="kraken"),
+            asset_class="crypto",
+        )
+
+        report_df, exit_code = run(
+            ["BTCUSDT"], "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+            store=store, report_dir=tmp_path / "quality",
+            source="binance", compare_source="kraken",
+        )
+
+        cross_rows = report_df[report_df["source"] == "binance+kraken"]
+        assert set(cross_rows["check_name"]) == {"cross_source_gaps", "cross_source_price"}
+        assert (cross_rows["severity"] == WARNING).all()
+        assert exit_code == 0  # WARNING-severity only, never blocks
+
+    def test_no_cross_source_rows_when_compare_source_not_set(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(_rows(["2024-01-01T00:00:00Z"], source="binance"), asset_class="crypto")
+
+        report_df, _ = run(
+            ["BTCUSDT"], "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            store=store, report_dir=tmp_path / "quality",
+        )
+
+        assert not any("+" in s for s in report_df["source"].unique())
+
+
 # ---------------------------------------------------------------------------
 # CLI argument parsing
 # ---------------------------------------------------------------------------
@@ -371,3 +493,19 @@ class TestArgParsing:
     def test_start_parses_date_only_as_utc(self):
         args = build_parser().parse_args(["--interval", "1h", "--start", "2024-01-01"])
         assert args.start == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    def test_source_defaults_to_ingestion_source(self):
+        args = build_parser().parse_args(["--interval", "1h"])
+        assert args.source == INGESTION_SOURCE
+
+    def test_source_can_be_overridden(self):
+        args = build_parser().parse_args(["--interval", "1h", "--source", "kraken"])
+        assert args.source == "kraken"
+
+    def test_compare_source_defaults_to_none(self):
+        args = build_parser().parse_args(["--interval", "1h"])
+        assert args.compare_source is None
+
+    def test_compare_source_can_be_set(self):
+        args = build_parser().parse_args(["--interval", "1h", "--compare-source", "kraken"])
+        assert args.compare_source == "kraken"

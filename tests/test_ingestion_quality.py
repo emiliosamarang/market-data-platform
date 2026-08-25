@@ -269,7 +269,7 @@ class TestCheckCrossSource:
         df_a = _rows(["2024-01-01T00:00:00Z"], source="binance")
         df_b = _rows([], source="kraken")
 
-        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
 
         assert gaps.passed and gaps.violation_count == 0
         assert price.passed and price.violation_count == 0
@@ -280,7 +280,7 @@ class TestCheckCrossSource:
         df_a = _rows(["2024-01-01T00:00:00Z"], source="binance")
         df_b = _rows(["2024-02-01T00:00:00Z"], source="kraken")
 
-        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
 
         assert gaps.passed
         assert price.passed
@@ -290,7 +290,7 @@ class TestCheckCrossSource:
         df_a = _rows(ts, source="binance", price=100.0)
         df_b = _rows(ts, source="kraken", price=100.3)  # ~0.3% off on close
 
-        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
 
         assert gaps.passed
         assert price.passed
@@ -300,7 +300,7 @@ class TestCheckCrossSource:
         df_a = _rows(ts, source="binance", price=100.0)  # close = 101.0
         df_b = _rows(ts, source="kraken", price=90.0)    # close = 91.0, ~10% off
 
-        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
 
         assert gaps.passed  # same timestamp present in both -> not a gap
         assert not price.passed
@@ -320,7 +320,7 @@ class TestCheckCrossSource:
             source="kraken",
         )
 
-        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
 
         assert not gaps.passed
         assert gaps.violation_count == 1
@@ -336,10 +336,42 @@ class TestCheckCrossSource:
         )
         df_b = _rows(["2024-01-03T00:00:00Z"], source="kraken")
 
-        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken")
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
 
         assert gaps.passed
         assert gaps.violation_count == 0
+
+    def test_still_forming_candle_excluded_from_comparison(self):
+        # Two independent order books mid-candle will legitimately disagree
+        # on the running price — comparing it would fire on every run for a
+        # known-harmless reason.
+        forming_ts = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        df_a = _rows([forming_ts.isoformat()], source="binance", price=100.0)
+        df_b = _rows([forming_ts.isoformat()], source="kraken", price=50.0)  # would fail threshold if compared
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
+
+        assert gaps.passed
+        assert price.passed
+
+    def test_forming_candle_excluded_but_closed_candles_still_compared(self):
+        # The fix must not mask a real deviation on an already-closed candle.
+        closed_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        forming_ts = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+        df_a = pd.concat([
+            _rows([closed_ts.isoformat()], source="binance", price=100.0),
+            _rows([forming_ts.isoformat()], source="binance", price=100.0),
+        ], ignore_index=True)
+        df_b = pd.concat([
+            _rows([closed_ts.isoformat()], source="kraken", price=90.0),   # closed, ~10% off -> real finding
+            _rows([forming_ts.isoformat()], source="kraken", price=50.0),  # forming -> must be ignored
+        ], ignore_index=True)
+
+        gaps, price = check_cross_source(df_a, df_b, "binance", "kraken", "1h")
+
+        assert not price.passed
+        assert price.violation_count == 1
 
 
 # ---------------------------------------------------------------------------

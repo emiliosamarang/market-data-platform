@@ -167,9 +167,17 @@ def _mad(x: np.ndarray) -> float:
 
 
 def check_cross_source(
-    df_a: pd.DataFrame, df_b: pd.DataFrame, source_a: str, source_b: str
+    df_a: pd.DataFrame, df_b: pd.DataFrame, source_a: str, source_b: str, interval: str
 ) -> tuple[CheckResult, CheckResult]:
     """Compare two sources' candles for the same symbol/interval.
+
+    Excludes any candle that hasn't fully closed yet (timestamp + interval
+    is still in the future) before comparing anything — two independent,
+    still-forming order books will always disagree slightly on an open
+    candle's running price, and a check that fires on every single run for
+    a known-harmless reason trains people to stop reading it, which is how
+    the one real warning gets missed. Mirrors the interval-aware tolerance
+    already used by check_freshness.
 
     Only compares within the date range where both sources actually have
     data. Kraken's public OHLC endpoint, for example, only ever covers the
@@ -186,6 +194,10 @@ def check_cross_source(
     - "cross_source_price": relative deviation between close prices, only
       over candles present in both sources.
     """
+    closed_cutoff = datetime.now(timezone.utc) - timedelta(milliseconds=interval_to_ms(interval))
+    df_a = df_a[df_a["timestamp"] <= closed_cutoff]
+    df_b = df_b[df_b["timestamp"] <= closed_cutoff]
+
     if df_a.empty or df_b.empty:
         detail = "no overlapping data (one or both sources empty for this range)"
         return (
@@ -310,7 +322,7 @@ def run(
             df_a = store.load_range(INGESTION_ASSET_CLASS, source, symbol, interval, start, end, dedupe=True)
             df_b = store.load_range(INGESTION_ASSET_CLASS, compare_source, symbol, interval, start, end, dedupe=True)
             combined_label = f"{source}+{compare_source}"
-            for result in check_cross_source(df_a, df_b, source, compare_source):
+            for result in check_cross_source(df_a, df_b, source, compare_source, interval):
                 _log_result(symbol, interval, combined_label, result)
                 rows.append(_report_row(run_ts, symbol, interval, combined_label, result))
 

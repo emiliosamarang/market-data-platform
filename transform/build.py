@@ -6,9 +6,10 @@ Usage:
 
 Build order (see MODEL.md): schema first, then the small dimensions
 (dim_symbol, dim_interval, dim_source, dim_date), then fact_ohlcv loaded
-from the Raw Parquet layer. fact_indicator/fact_signal and
-fact_backtest_run/fact_backtest_trade come later, once this foundation
-holds plausible row counts.
+from the Raw Parquet layer, then fact_indicator/fact_signal computed from
+fact_ohlcv_canonical by reusing bot.py's own indicator/strategy functions.
+fact_backtest_run/fact_backtest_trade come last, once backtest.py writes
+into the DB instead of the console.
 """
 import argparse
 import logging
@@ -17,13 +18,15 @@ from datetime import datetime, timedelta, timezone
 import duckdb
 
 from config import (
-    CURATED_DB_PATH, INGESTION_INTERVALS, INGESTION_SOURCES, INGESTION_SYMBOLS,
-    RAW_DATA_DIR, setup_logging,
+    CURATED_DB_PATH, HIGHER_INTERVAL, INGESTION_INTERVALS, INGESTION_SOURCES,
+    INGESTION_SYMBOLS, LOWER_INTERVAL, RAW_DATA_DIR, setup_logging,
 )
 from ingestion.raw_store import RawStore
 from transform.db import connect
 from transform.dims import populate_all_dims
+from transform.fact_indicator import load_fact_indicator
 from transform.fact_ohlcv import load_fact_ohlcv
+from transform.fact_signal import load_fact_signal
 from transform.schema import create_schema
 
 log = logging.getLogger("transform.build")
@@ -41,12 +44,22 @@ def build(
     sources: list[str],
     start: datetime,
     end: datetime,
-) -> int:
+    lower_interval: str = LOWER_INTERVAL,
+    higher_interval: str = HIGHER_INTERVAL,
+) -> dict[str, int]:
     create_schema(conn)
     populate_all_dims(conn)
-    row_count = load_fact_ohlcv(conn, store, symbols, intervals, sources, start, end)
-    log.info("fact_ohlcv: %d rows loaded", row_count)
-    return row_count
+
+    ohlcv_rows = load_fact_ohlcv(conn, store, symbols, intervals, sources, start, end)
+    log.info("fact_ohlcv: %d rows loaded", ohlcv_rows)
+
+    indicator_rows = load_fact_indicator(conn, symbols, intervals, start, end)
+    log.info("fact_indicator: %d rows loaded", indicator_rows)
+
+    signal_rows = load_fact_signal(conn, symbols, lower_interval, higher_interval, start, end)
+    log.info("fact_signal: %d rows loaded", signal_rows)
+
+    return {"fact_ohlcv": ohlcv_rows, "fact_indicator": indicator_rows, "fact_signal": signal_rows}
 
 
 def build_parser() -> argparse.ArgumentParser:

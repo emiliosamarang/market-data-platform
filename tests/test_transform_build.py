@@ -42,30 +42,42 @@ class TestBuild:
             "transform.build.load_fact_ohlcv",
             lambda *a, **k: calls.append("fact_ohlcv") or 0,
         )
+        monkeypatch.setattr(
+            "transform.build.load_fact_indicator",
+            lambda *a, **k: calls.append("fact_indicator") or 0,
+        )
+        monkeypatch.setattr(
+            "transform.build.load_fact_signal",
+            lambda *a, **k: calls.append("fact_signal") or 0,
+        )
 
         build(
             MagicMock(), MagicMock(), ["BTCUSDT"], ["1h"], ["binance"],
             datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 1, 2, tzinfo=timezone.utc),
         )
 
-        assert calls == ["schema", "dims", "fact_ohlcv"]
+        assert calls == ["schema", "dims", "fact_ohlcv", "fact_indicator", "fact_signal"]
 
-    def test_returns_row_count_from_fact_ohlcv_load(self, monkeypatch):
+    def test_returns_row_counts_per_table(self, monkeypatch):
         monkeypatch.setattr("transform.build.create_schema", lambda conn: None)
         monkeypatch.setattr("transform.build.populate_all_dims", lambda conn: None)
         monkeypatch.setattr("transform.build.load_fact_ohlcv", lambda *a, **k: 42)
+        monkeypatch.setattr("transform.build.load_fact_indicator", lambda *a, **k: 40)
+        monkeypatch.setattr("transform.build.load_fact_signal", lambda *a, **k: 35)
 
         result = build(
             MagicMock(), MagicMock(), ["BTCUSDT"], ["1h"], ["binance"],
             datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 1, 2, tzinfo=timezone.utc),
         )
 
-        assert result == 42
+        assert result == {"fact_ohlcv": 42, "fact_indicator": 40, "fact_signal": 35}
 
     def test_passes_requested_symbols_intervals_sources_through(self, monkeypatch):
         received = {}
         monkeypatch.setattr("transform.build.create_schema", lambda conn: None)
         monkeypatch.setattr("transform.build.populate_all_dims", lambda conn: None)
+        monkeypatch.setattr("transform.build.load_fact_indicator", lambda *a, **k: 0)
+        monkeypatch.setattr("transform.build.load_fact_signal", lambda *a, **k: 0)
 
         def fake_load(conn, store, symbols, intervals, sources, start, end):
             received.update(symbols=symbols, intervals=intervals, sources=sources)
@@ -83,3 +95,24 @@ class TestBuild:
             "intervals": ["1h", "4h"],
             "sources": ["binance", "kraken"],
         }
+
+    def test_passes_lower_and_higher_interval_to_fact_signal(self, monkeypatch):
+        received = {}
+        monkeypatch.setattr("transform.build.create_schema", lambda conn: None)
+        monkeypatch.setattr("transform.build.populate_all_dims", lambda conn: None)
+        monkeypatch.setattr("transform.build.load_fact_ohlcv", lambda *a, **k: 0)
+        monkeypatch.setattr("transform.build.load_fact_indicator", lambda *a, **k: 0)
+
+        def fake_load_signal(conn, symbols, lower_interval, higher_interval, start, end):
+            received.update(lower_interval=lower_interval, higher_interval=higher_interval)
+            return 0
+
+        monkeypatch.setattr("transform.build.load_fact_signal", fake_load_signal)
+
+        build(
+            MagicMock(), MagicMock(), ["BTCUSDT"], ["1h", "4h"], ["binance"],
+            datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 1, 2, tzinfo=timezone.utc),
+            lower_interval="1h", higher_interval="4h",
+        )
+
+        assert received == {"lower_interval": "1h", "higher_interval": "4h"}

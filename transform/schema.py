@@ -60,6 +60,45 @@ QUALIFY ROW_NUMBER() OVER (
     PARTITION BY f.symbol, f.interval, f.timestamp
     ORDER BY s.priority
 ) = 1;
+
+-- Grain: (symbol, interval, timestamp) — computed from the *canonical*
+-- OHLCV row only (see fact_ohlcv_canonical above), one indicator reading
+-- per candle, not per source. Values reuse bot.py's own indicator
+-- functions (add_indicators) rather than a second implementation — see
+-- MODEL.md "Where indicators and signals get computed". NULL-able: RSI,
+-- ATR and Volume_MA need a warmup window before they're defined, and
+-- rows without them aren't loaded (see transform/fact_indicator.py).
+CREATE TABLE IF NOT EXISTS fact_indicator (
+    symbol VARCHAR NOT NULL REFERENCES dim_symbol(symbol),
+    interval VARCHAR NOT NULL REFERENCES dim_interval(interval),
+    timestamp TIMESTAMPTZ NOT NULL,
+    ema_20 DOUBLE,
+    ema_50 DOUBLE,
+    rsi DOUBLE,
+    macd DOUBLE,
+    macd_signal DOUBLE,
+    macd_hist DOUBLE,
+    atr DOUBLE,
+    volume_ma DOUBLE,
+    PRIMARY KEY (symbol, interval, timestamp)
+);
+
+-- Grain: (symbol, interval, timestamp), but only ever populated for
+-- config.LOWER_INTERVAL ("1h") — the strategy's signal is inherently a
+-- lower-timeframe read informed by a higher-timeframe trend filter (see
+-- bot.generate_entry_signal), not something that exists per-interval
+-- independently. `interval` stays in the grain for schema consistency
+-- with the other fact tables, not because a standalone 4h signal is a
+-- real concept here.
+CREATE TABLE IF NOT EXISTS fact_signal (
+    symbol VARCHAR NOT NULL REFERENCES dim_symbol(symbol),
+    interval VARCHAR NOT NULL REFERENCES dim_interval(interval),
+    timestamp TIMESTAMPTZ NOT NULL,
+    higher_trend VARCHAR NOT NULL,  -- BULLISH/BEARISH/NEUTRAL, from bot.get_trend_4h via the higher interval
+    signal VARCHAR NOT NULL,        -- BUY/SELL/HOLD/NOT ENOUGH DATA, from bot.generate_entry_signal
+    score DOUBLE,                   -- bot.calculate_score; -999 sentinel on missing inputs, same as bot.py's own convention
+    PRIMARY KEY (symbol, interval, timestamp)
+);
 """
 
 

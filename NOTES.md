@@ -430,3 +430,121 @@ Kraken richtig, oder umgekehrt), ist damit nicht automatisch entschieden;
 der Raw Layer speichert weiterhin beide Quellen unverändert nebeneinander,
 ohne automatische Korrektur. Diese Wertfrage fällt erst beim Aufbau des
 Curated Layer in Phase 3 (siehe `ROADMAP.md`), nicht implizit im Code.
+
+## Buy-and-Hold-Benchmark, Risikokennzahlen und Marktphasen-Attribution
+
+`backtest.py` bekam eine Buy-and-Hold-Vergleichslinie pro Symbol (Kauf zum
+Open der ersten Kerze, Verkauf zum Close der letzten, volle `ACCOUNT_SIZE`
+als Positionsgröße, dieselbe Round-Trip-Gebühr wie die Strategie) sowie
+zwei Kennzahlen, die zur risikofokussierten Positionierung passen: Return
+pro Einheit Max-Drawdown, und Rendite aufgeschlüsselt nach Marktphase
+(bullish/bearish/neutral, klassifiziert über `bot.py`s eigenen
+`get_trend_4h`-Filter — keine zweite, separat definierte Trend-Logik).
+
+**Beide vollständigen Ergebnistabellen, nichts weggelassen — gerade die
+Zeilen, in denen die Strategie verliert, tragen die Glaubwürdigkeit der
+Zeilen, in denen sie gewinnt:**
+
+### 365 Tage (Stand 2026-08-25)
+
+| Symbol | Strategie | Buy & Hold | Differenz | B&H Max DD |
+|---|---|---|---|---|
+| BTCUSDT | +3.0% | −29.7% | +32.7pp | 53.7% |
+| ETHUSDT | −4.1% | −47.0% | +42.9pp | 68.0% |
+| SOLUSDT | +23.7% | −50.7% | +74.4pp | 75.8% |
+| XRPUSDT | +31.6% | −50.6% | +82.2pp | 68.8% |
+| ADAUSDT | +33.1% | −75.3% | +108.4pp | 85.4% |
+| **Combined** | **+17.5%** | **−50.7%** | **+68.1pp** | 69.2% |
+
+Dieses Fenster deckt einen scharfen Markteinbruch ab. Buy & Hold verliert
+auf allen fünf Symbolen deutlich, die Strategie bleibt dank Trendfilter und
+Stop-Loss überall positiv bis leicht negativ.
+
+### 2 Jahre (voller verfügbarer Zeitraum)
+
+| Symbol | Strategie | Buy & Hold | Differenz | B&H Max DD |
+|---|---|---|---|---|
+| BTCUSDT | −5.7% | +23.1% | **−28.8pp** | 53.7% |
+| ETHUSDT | −13.8% | −10.6% | **−3.2pp** | 69.1% |
+| SOLUSDT | +31.5% | −38.5% | +70.0pp | 78.7% |
+| XRPUSDT | +72.9% | **+143.2%** | **−70.3pp** | 72.9% |
+| ADAUSDT | +38.3% | −44.4% | +82.7pp | 89.3% |
+| **Combined** | **+24.6%** | +14.5% | +10.1pp | 70.0% |
+
+Hier ist das Bild gemischt — kein sauberes "Strategie schlägt Markt". Auf
+BTC und XRP verliert die Strategie gegen simples Halten deutlich (bei XRP,
+weil eine durchgehaltene Rally von +143 % besser ist als wiederholtes
+Ein-/Aussteigen mit Gebühren). Auf SOL/ADA gewinnt sie klar, weil sie tiefe
+Abstürze (−38 % bis −44 %) größtenteils vermeidet.
+
+**Das eine robuste, konsistente Ergebnis über beide Zeiträume und alle
+Symbole:** Max Drawdown der Strategie liegt durchgehend bei 3,6–25,1 %,
+Buy & Hold bei 53,7–89,3 %. Kein Ausreißer, sondern strukturell — der
+Stop-Loss tut genau das, wofür er da ist.
+
+### Return/Max-Drawdown-Ratio — wo sich das Bild dreht
+
+Rohe Rendite allein versteckt, dass ein Teil von Buy & Holds Vorsprung nur
+mit deutlich mehr Risiko erkauft ist. `_return_to_drawdown_ratio()`
+(Rendite in % geteilt durch Max-Drawdown in %; bei Drawdown = 0 und
+Rendite > 0 → `inf`, sonst 0) macht das sichtbar:
+
+| Symbol | 365T Strat | 365T B&H | 2J Strat | 2J B&H |
+|---|---|---|---|---|
+| BTCUSDT | 0.22 | −0.55 | −0.23 | 0.43 |
+| ETHUSDT | −0.26 | −0.69 | −0.58 | −0.15 |
+| SOLUSDT | 1.87 | −0.67 | 2.47 | −0.49 |
+| XRPUSDT | 4.06 | −0.73 | **11.32** | **1.96** |
+| ADAUSDT | 2.99 | −0.88 | 2.31 | −0.50 |
+| **Combined** | **4.82** | −0.73 | **2.79** | 0.21 |
+
+Genau der vorhergesagte Dreh bei XRP über 2 Jahre: Buy & Hold gewinnt bei
+der rohen Rendite (+143,2 % vs. +72,9 %), aber die Strategie liefert pro
+Einheit Risiko fast das Sechsfache (11,32 vs. 1,96) — B&H erkauft die
+höhere Rendite mit 72,9 % Max-Drawdown, mehr als das Zehnfache dessen, was
+die Strategie durchmacht (6,4 %). Combined bleibt die Strategie in beiden
+Zeiträumen risikoadjustiert klar vorn, selbst dort, wo die rohe Rendite
+knapper ausfällt (2 Jahre: +24,6 % vs. +14,5 %, aber 2.79 vs. 0.21 im
+Verhältnis).
+
+### Rendite pro Marktphase — die eigentliche Erkenntnis in Zahlen
+
+**Methodik:** Jede 4h-Kerze wird über `bot.py`s eigenen `get_trend_4h`
+(dieselbe Logik, die die Strategie selbst zum Ein-/Ausstieg nutzt) als
+BULLISH/BEARISH/NEUTRAL klassifiziert. Für Buy & Hold wird der
+Log-Return jeder 1h-Kerze der Phase zugeordnet, die zu diesem Zeitpunkt
+galt, und pro Phase aufsummiert (Log-Returns sind additiv, also verlustfrei
+zerlegbar) — für die Strategie reicht die Trade-`side` selbst als
+Phasen-Label (BUY entsteht nur in einer BULLISH-, SELL nur in einer
+BEARISH-Phase, per `generate_entry_signal`).
+
+**Wichtige Einordnung, bevor die Zahlen wirken wie ein Fehler:** Die
+Bullish-Phase-Werte für Buy & Hold sind über 2 Jahre teils vierstellig
+(z. B. XRP: +4500,5 %). Das ist **kein literal erzielbarer Ertrag**,
+sondern eine mathematische Kompositions-Zerlegung — viele einzelne,
+nicht zusammenhängende Bullish-Abschnitte über 2 Jahre, deren Log-Returns
+sich beim Zurückrechnen in Prozent multiplikativ statt additiv
+kombinieren. Aussagekräftig ist nicht die absolute Zahl, sondern der
+**Vergleich B&H vs. Strategie innerhalb derselben Phase**.
+
+| Symbol | Bullish B&H (2J) | Bullish Strat (2J) | Bearish B&H (2J) | Bearish Strat (2J) |
+|---|---|---|---|---|
+| BTCUSDT | +888.8% | −0.4% | −86.8% | −5.3% |
+| ETHUSDT | +2295.1% | +1.8% | −96.6% | −15.6% |
+| SOLUSDT | +3068.0% | +14.2% | −98.2% | +17.3% |
+| XRPUSDT | +4500.5% | +15.1% | −96.3% | +57.8% |
+| ADAUSDT | +2885.2% | +2.2% | −98.5% | +36.2% |
+| **Combined** | **+2727.5%** | **+6.6%** | **−95.3%** | **+18.1%** |
+
+Das ist der eigentliche Befund, den die rohen Renditezahlen nur andeuten:
+**In Bullenphasen erfasst die Strategie nur einen winzigen Bruchteil der
+verfügbaren Bewegung** — sie steigt wiederholt ein und aus, zahlt jedes
+Mal Gebühren, und verpasst den Großteil einer durchgehaltenen Rally. **In
+Bärenphasen ist es umgekehrt:** Buy & Hold verliert nahezu die gesamte
+Position (−86 % bis −98,5 % attributiert), während die Strategie durch
+Stop-Loss (und bei ADA/SOL/XRP profitable SELL-Trades) flach bis deutlich
+positiv bleibt. Der Netto-Vorteil der Strategie ist ein Risiko-Trade: viel
+Bullenphasen-Upside gegen fast die gesamte Bärenphasen-Downside getauscht
+— bei XRP über 2 Jahre war dieser Tausch in absoluten Zahlen ein
+Verlustgeschäft (Bullish-Verzicht > Bearish-Ersparnis), risikoadjustiert
+(Return/MaxDD 11,32 vs. 1,96) trotzdem klar vorteilhaft.

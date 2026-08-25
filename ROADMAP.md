@@ -68,11 +68,18 @@ in der Vergangenheit ein Signal ausgelöst hat. Hier siehst du die Strategie
 
 **Signal & Strategy Performance** — Alle historisch erzeugten Signale als
 Tabelle und Zeitstrahl. Pro Backtest-Lauf: Trades, Trefferquote, Profit Factor,
-Drawdown, Gebührenanteil. Und — das ist der eigentlich interessante Teil — der
-Vergleich mehrerer Läufe gegeneinander: Was passiert mit dem Profit Factor, wenn
-ich den RSI-Schwellwert oder das ATR-Multiple verändere? Jeder Backtest-Lauf ist
-ein Datensatz mit seinen Parametern, also lässt sich das als Parametervergleich
-visualisieren statt als Zettelwirtschaft.
+Gebührenanteil — und **Drawdown sowie Buy-and-Hold-Benchmark gleichrangig neben
+der Rendite, nicht als Fußnote**. Der Backtest-Vergleich vom 25.08. hat gezeigt,
+warum das nicht optional ist: rohe Rendite allein hätte XRP über 2 Jahre als
+Verlustgeschäft gegenüber simplem Halten gezeigt (+72,9 % vs. +143,2 %) — erst
+Drawdown (6,4 % vs. 72,9 %) und Return/MaxDD-Ratio (11,32 vs. 1,96) zeigen, dass
+die Strategie dort risikoadjustiert klar vorn liegt. Eine Seite, die nur Rendite
+zeigt, hätte genau die falsche Schlussfolgerung nahegelegt. Und — das ist der
+eigentlich interessante Teil — der Vergleich mehrerer Läufe gegeneinander: Was
+passiert mit Profit Factor *und* Drawdown, wenn ich den RSI-Schwellwert oder das
+ATR-Multiple verändere? Jeder Backtest-Lauf ist ein Datensatz mit seinen
+Parametern, also lässt sich das als Parametervergleich visualisieren statt als
+Zettelwirtschaft.
 
 **Data Quality & Pipeline Health** — Wann lief die Pipeline zuletzt, wie
 vollständig ist der Bestand pro Symbol/Intervall, wie viele Zeilen kamen dazu,

@@ -138,6 +138,19 @@ On the two most liquid pairs — BTC and ETH — the strategy is a fee machine w
 
 **Conclusion:** this is not just "not yet validated" — it's a concrete negative result on the pairs that matter most. After fees, the strategy has no edge on BTC or ETH, the two most liquid symbols and the ones closest to what could actually be traded at size. The positive combined return is not broad-based: it comes entirely from three smaller-cap alts (ADA/XRP/SOL) during a window in which alts happened to run well — concentration in a favorable period, not a demonstrated edge. Results also swing sharply with the chosen time window (a strongly profitable year vs. a losing quarter), so a single-run backtest number, good or bad, isn't a reliable basis for judging the strategy on its own.
 
+### Buy-and-hold benchmark: risk, not just return, is the real story
+
+Every backtest now runs against a buy-and-hold benchmark (same capital base, same fee rate) and reports max drawdown and return-per-unit-of-drawdown for both:
+
+| Period | Strategy return | B&H return | Strategy max DD | B&H max DD | Strategy Return/DD | B&H Return/DD |
+|---|---|---|---|---|---|---|
+| 365 days, combined | **+17.5%** | −50.7% | **3.6%** | 69.2% | **4.82** | −0.73 |
+| 2 years, combined | **+24.6%** | +14.5% | **8.8%** | 70.0% | **2.79** | 0.21 |
+
+Raw return alone is not a clean story — buy-and-hold beats the strategy outright on BTC and (over 2 years) on XRP, where a held rally outperforms repeated in/out trading net of fees. But **one result is consistent across every symbol and both periods: max drawdown**. The strategy's drawdown never exceeds 25%; buy-and-hold's ranges from 54% to 89%. Even where buy-and-hold wins on raw return (XRP, 2 years: +143.2% vs +72.9%), the strategy wins on a risk-adjusted basis by nearly 6x (11.32 vs 1.96 return-per-unit-drawdown) — B&H's higher return comes with more than 10x the drawdown.
+
+Splitting return by market regime (bullish/bearish, via `bot.py`'s own trend filter) shows why: in bullish phases the strategy captures only a small fraction of a held rally (repeated entries/exits, fees on every round trip), while in bearish phases buy-and-hold's compounded loss is severe (roughly −85% to −98% attributable to bearish-classified hours, combined) and the strategy stays flat to positive. It trades most of the upside for most of the downside — a real, quantifiable tradeoff, not free money either direction. Full per-symbol breakdown, the phase-return methodology, and the caveat on how to read those compounded percentages: `NOTES.md`.
+
 This is exactly why the current priority is the `ingestion/` raw-data layer and its data-quality/reporting correctness rather than further strategy tuning: without a fixed, reproducible historical dataset, proper walk-forward validation, and a backtest that accounts for capital correctly, no result from this strategy — good or bad — is trustworthy enough to act on yet.
 
 ## Roadmap

@@ -135,15 +135,41 @@ Profit Factor, Trefferquote, Datenvollständigkeit in Prozent).
 **Warum zuerst:** Das ist der Check, der die 452-vs-138-Trades-Sache gefunden
 hätte, bevor sie zwei Stunden Debugging gekostet hat.
 
-### Phase 2 — Zweite Datenquelle
+### Phase 2 — Zweite Datenquelle ✅
 *Ziel: Multi-Source-Fähigkeit beweisen und Daten gegeneinander validieren.*
 
-- Zweiten `MarketDataSource` implementieren (Kraken oder Coinbase — beide ohne
-  API-Key für öffentliche OHLCV-Daten)
-- Quelle als Partitionsdimension in den Raw Layer aufnehmen
-- Cross-Source-Check: Abweichung zwischen den Quellen pro Candle, Alarm ab
-  Schwellwert
-- Die bestehende Abstraktion trägt das schon — hier zahlt sich das Interface aus
+- Zweiten `MarketDataSource` implementiert: Kraken, öffentliche OHLC-API ohne
+  API-Key. Wichtige Einschränkung, erst gegen die Live-API verifiziert statt
+  aus der Doku übernommen: der Endpoint liefert nie mehr als die letzten
+  ~720 Kerzen (~30 Tage bei 1h, ~120 Tage bei 4h), unabhängig vom
+  `since`-Parameter — kein Pagination-Problem, sondern eine harte Grenze des
+  Endpoints. Kraken taugt damit für Cross-Validation des aktuellen Fensters,
+  nicht für einen vollen Zweitquellen-Backfill über die gesamte Binance-Historie.
+- Quelle war bereits Partitionsdimension im Raw Layer
+  (`{asset_class}/{source}/{symbol}/{interval}/{date}`, seit Phase 1) — keine
+  Migration nötig, Kraken-Daten liegen einfach zusätzlich unter `.../kraken/...`.
+- `ingestion/load.py` und `ingestion/quality.py` haben beide ein `--source`
+  Flag (Registry `binance`/`kraken`) bekommen, damit derselbe CLI-Einstieg für
+  jede Quelle funktioniert.
+- Cross-Source-Check in `quality.py` (`--compare-source`): Abweichung auf
+  Close-Basis, 0,5 % Schwelle, WARNING (nie blockierend — verschiedene Börsen
+  sind verschiedene Märkte mit eigener Liquidität). Fehlende Kerze in einer
+  Quelle ist ein eigener Befund (`cross_source_gaps`), kein Preisvergleich —
+  und nur innerhalb des Fensters geprüft, in dem beide Quellen tatsächlich
+  Daten haben (sonst würde Krakens Tiefenlimit die gesamte ältere
+  Binance-Historie fälschlich als "Lücke" markieren).
+- Ergebnis gegen echte Daten: alle 5 Symbole, keine Coverage-Lücken im
+  überlappenden Fenster, Preise stimmen bei 1h durchgehend überein; bei 4h
+  weicht ausschließlich die aktuell noch offene, sich füllende Kerze leicht ab
+  (0,8–1,3 %) — plausibel für eine unabgeschlossene Kerze zwischen zwei
+  unabhängigen Orderbooks, kein Datenfehler. Details in `NOTES.md`.
+
+**Offene Frage für später, bewusst hier notiert statt implizit im Code
+entschieden:** Wenn sich Binance und Kraken widersprechen — welche Quelle
+gilt? Antwort für jetzt: **keine**. Der Raw Layer speichert beide Quellen
+unverändert nebeneinander; eine Entscheidung (z. B. primäre Quelle,
+Mittelwert, zuletzt-aktualisiert) fällt erst beim Aufbau des Curated Layer
+in Phase 3, nicht vorher.
 
 ### Phase 3 — Curated Layer lokal
 *Ziel: Aus Rohdaten wird ein Modell, mit dem man analysieren kann.*

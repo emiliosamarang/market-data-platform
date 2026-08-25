@@ -330,3 +330,63 @@ zufällig profitable Alt-Symbole. Der Satz "Strategie ist noch nicht
 belastbar validiert" (README) bleibt damit unverändert stehen — bestätigt
 durch einen zweiten, hier selbst gefundenen Reporting-Bug, nicht widerlegt
 durch eine höhere Zahl.
+
+## Phase 2: Kraken als zweite Datenquelle — 720-Kerzen-Limit und Cross-Source-Check
+
+Vor der Implementierung stand die Annahme im Raum, `RawStore` müsse für eine
+zweite Quelle erst um eine `source`-Partitionsebene erweitert werden
+(inklusive Migration der bestehenden 7.340 Binance-Dateien). Das war falsch
+und beruhte erkennbar auf einer Vermutung ohne Live-Zugriff auf den Code
+("Heute liegt der Pfad vermutlich als symbol/interval/datum"): Der Pfad war
+schon seit Phase 1 `{asset_class}/{source}/{symbol}/{interval}/{date}` —
+`source` lag bereits ganz vorne, genau wo eine zweite Quelle es braucht.
+Keine Migration nötig, Kraken-Daten liegen einfach zusätzlich unter
+`data/raw/crypto/kraken/...` neben `.../binance/...`.
+
+**Kraken-Historientiefe — live gegen die echte API verifiziert, nicht aus
+der Doku übernommen.** Kraken dokumentiert für `/public/OHLC`: "Returns up
+to 720 of the most recent entries (older data cannot be retrieved,
+regardless of the value of `since`)." Das wurde vor der Implementierung
+gegengecheckt statt einfach geglaubt: ein Request mit `since` = 1000 Stunden
+in der Vergangenheit lieferte trotzdem nur das Fenster der letzten 720
+Kerzen endend bei "jetzt" — `since` filtert innerhalb dieses festen
+Fensters, ist aber kein Werkzeug, um weiter in die Vergangenheit zu
+paginieren. Für 1h-Kerzen sind das ~30 Tage, für 4h ~120 Tage; ein
+Zwei-Jahres-Backfill wie bei Binance ist über diesen Endpoint schlicht nicht
+erreichbar. Praktische Konsequenz: Kraken taugt für Cross-Validation des
+aktuellen Fensters, nicht für einen vollständigen Zweitquellen-Backfill.
+
+**Zweite Kraken-Eigenheit:** keine einheitliche Symbol-Notation. BTC heißt
+intern "XBT", und legacy gelistete Paare (BTC/ETH/XRP) liefern vom
+OHLC-Endpoint einen anderen, X/Z-präfixierten Response-Key zurück als den
+abgefragten (Query `XBTUSD` → Response-Key `XXBTZUSD`), während neuere
+Listings (SOL/ADA) auf beiden Seiten denselben String verwenden — live
+gegen `/public/AssetPairs` verifiziert. Gelöst über eine explizite
+Mapping-Tabelle für die Query-Seite (`_SYMBOL_MAP` in `kraken_source.py`)
+plus dynamisches Lesen des tatsächlich zurückgegebenen Keys, statt
+anzunehmen, er entspräche der Query.
+
+**Cross-Source-Check gegen echte Daten (alle 5 Symbole, Binance vs.
+Kraken):**
+
+- 1h: keine Coverage-Lücken im überlappenden Fenster (26.07.–25.08.),
+  Preise stimmen bei allen 5 Symbolen innerhalb der 0,5-%-Schwelle überein.
+- 4h: ebenfalls keine Coverage-Lücken; bei BTCUSDT, SOLUSDT und ADAUSDT
+  genau eine Preis-Abweichung (0,8–1,3 %) — jeweils exakt die letzte, noch
+  offene 4h-Kerze (2026-08-25T08:00, zum Zeitpunkt des Checks noch nicht
+  geschlossen). Zwei unabhängige, noch unfertige Orderbooks dürfen sich beim
+  aktuellen Preis leicht unterscheiden — das ist der erwartete Fall, für den
+  die Schwelle WARNING statt ERROR ist, kein Datenfehler.
+
+Der Vergleich läuft bewusst nur im Fenster, in dem beide Quellen tatsächlich
+Daten haben (Schnittmenge der jeweiligen Zeitspannen, nicht der angefragte
+Bereich) — sonst würde Krakens Tiefenlimit die gesamte ältere
+Binance-Historie fälschlich als "nur in einer Quelle vorhanden" markieren,
+obwohl das schlicht außerhalb von Krakens Reichweite liegt und kein
+Datenproblem ist.
+
+**Konfliktauflösung bewusst nicht entschieden:** Weichen die Quellen
+voneinander ab, entscheidet aktuell nichts, welche "gilt" — der Raw Layer
+speichert beide unverändert nebeneinander. Diese Entscheidung fällt erst
+beim Aufbau des Curated Layer in Phase 3 (siehe `ROADMAP.md`), nicht
+implizit im Code.

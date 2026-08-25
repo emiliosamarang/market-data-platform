@@ -356,6 +356,31 @@ Zwei-Jahres-Backfill wie bei Binance ist über diesen Endpoint schlicht nicht
 erreichbar. Praktische Konsequenz: Kraken taugt für Cross-Validation des
 aktuellen Fensters, nicht für einen vollständigen Zweitquellen-Backfill.
 
+**Das Limit ist strukturell, kein API-Detail — zwei Konsequenzen, die daraus
+zwingend folgen, nicht aus Geschmack:**
+
+1. **Rollenverteilung ist damit faktisch entschieden.** Binance ist die
+   Quelle mit vollständiger Historie, Kraken dient ausschließlich der
+   Validierung des jüngsten, rollierenden Fensters. Kraken ist keine
+   gleichwertige zweite Quelle für den Curated Layer — es liefert keine
+   eigenen Zeilen für Zeiträume außerhalb seines Fensters und tritt nicht
+   in Konkurrenz zu Binance als Quelle der Wahrheit. Das beantwortet einen
+   Teil der ursprünglich offenen Konfliktfrage (siehe unten): der Curated
+   Layer wird aus Binance gespeist, Kraken bleibt Prüfinstanz. Was bei einer
+   *tatsächlichen* Abweichung innerhalb des überlappenden Fensters passiert
+   (welcher Wert landet im Fakt, falls sie sich widersprechen), ist damit
+   noch nicht entschieden — nur, dass Kraken dafür nie die primäre Quelle
+   wird.
+2. **Krakens Fenster ist unwiederbringlich.** Sobald eine Kerze aus dem
+   720er-Fenster herausfällt, ist sie über diesen Endpoint für immer weg —
+   es gibt keinen Nachlade-Mechanismus. Läuft der Ingestion-Job vier Wochen
+   nicht, ist das komplette 1h-Fenster durch, und die Lücke lässt sich nie
+   mehr schließen (Binance bleibt davon unberührt, hat ja die volle
+   Historie — betrifft nur Krakens Beitrag zur Cross-Validation). Das macht
+   Phase 4 (Orchestrierung: "läuft ohne dich, Fehler sind sichtbar") von
+   "wäre schön" zu "muss stehen, bevor Kraken-Daten laufend verloren gehen"
+   — festgehalten in `ROADMAP.md`.
+
 **Zweite Kraken-Eigenheit:** keine einheitliche Symbol-Notation. BTC heißt
 intern "XBT", und legacy gelistete Paare (BTC/ETH/XRP) liefern vom
 OHLC-Endpoint einen anderen, X/Z-präfixierten Response-Key zurück als den
@@ -372,11 +397,22 @@ Kraken):**
 - 1h: keine Coverage-Lücken im überlappenden Fenster (26.07.–25.08.),
   Preise stimmen bei allen 5 Symbolen innerhalb der 0,5-%-Schwelle überein.
 - 4h: ebenfalls keine Coverage-Lücken; bei BTCUSDT, SOLUSDT und ADAUSDT
-  genau eine Preis-Abweichung (0,8–1,3 %) — jeweils exakt die letzte, noch
-  offene 4h-Kerze (2026-08-25T08:00, zum Zeitpunkt des Checks noch nicht
-  geschlossen). Zwei unabhängige, noch unfertige Orderbooks dürfen sich beim
-  aktuellen Preis leicht unterscheiden — das ist der erwartete Fall, für den
-  die Schwelle WARNING statt ERROR ist, kein Datenfehler.
+  zunächst eine Preis-Abweichung (0,8–1,3 %) — jeweils exakt die letzte,
+  zum Zeitpunkt des ersten Checks noch nicht geschlossene 4h-Kerze
+  (2026-08-25T08:00). Zwei unabhängige, noch unfertige Orderbooks dürfen
+  sich beim laufenden Preis leicht unterscheiden — das ist der erwartete
+  Fall, kein Datenfehler.
+
+**Aber:** ein Check, der bei jedem nächtlichen Lauf auf der jeweils
+aktuellsten Kerze feuert, ist nutzlos — nach zwei Wochen liest ihn niemand
+mehr, und die eine echte Warnung geht darin unter. `check_cross_source`
+schließt jetzt jede noch nicht abgeschlossene Kerze (`timestamp + interval`
+liegt noch in der Zukunft) explizit vom Vergleich aus, analog zur
+Zwei-Intervall-Toleranz in `check_freshness`. Gegenprobe: BTCUSDT, SOLUSDT
+und ADAUSDT neu geladen, nachdem die 08:00-Kerze real geschlossen hatte
+(12:15 UTC, Kerzenende 12:00) — Abweichung war weg. Bestätigt beides
+zugleich: die Erklärung war richtig (reines Formations-Rauschen, kein
+Datenproblem), und der Ausschluss-Fix greift korrekt.
 
 Der Vergleich läuft bewusst nur im Fenster, in dem beide Quellen tatsächlich
 Daten haben (Schnittmenge der jeweiligen Zeitspannen, nicht der angefragte
@@ -385,8 +421,12 @@ Binance-Historie fälschlich als "nur in einer Quelle vorhanden" markieren,
 obwohl das schlicht außerhalb von Krakens Reichweite liegt und kein
 Datenproblem ist.
 
-**Konfliktauflösung bewusst nicht entschieden:** Weichen die Quellen
-voneinander ab, entscheidet aktuell nichts, welche "gilt" — der Raw Layer
-speichert beide unverändert nebeneinander. Diese Entscheidung fällt erst
-beim Aufbau des Curated Layer in Phase 3 (siehe `ROADMAP.md`), nicht
-implizit im Code.
+**Konfliktauflösung — Rollenfrage entschieden, Wertfrage noch offen:** Die
+720-Kerzen-Grenze entscheidet bereits, wer im Curated Layer die Quelle der
+Wahrheit ist (Binance, volle Historie) und wer nur Prüfinstanz bleibt
+(Kraken, rollierendes Fenster) — siehe oben. Was aber bei einer *echten*
+Abweichung innerhalb des überlappenden Fensters passiert (Binance falsch,
+Kraken richtig, oder umgekehrt), ist damit nicht automatisch entschieden;
+der Raw Layer speichert weiterhin beide Quellen unverändert nebeneinander,
+ohne automatische Korrektur. Diese Wertfrage fällt erst beim Aufbau des
+Curated Layer in Phase 3 (siehe `ROADMAP.md`), nicht implizit im Code.

@@ -159,17 +159,35 @@ hätte, bevor sie zwei Stunden Debugging gekostet hat.
   Daten haben (sonst würde Krakens Tiefenlimit die gesamte ältere
   Binance-Historie fälschlich als "Lücke" markieren).
 - Ergebnis gegen echte Daten: alle 5 Symbole, keine Coverage-Lücken im
-  überlappenden Fenster, Preise stimmen bei 1h durchgehend überein; bei 4h
-  weicht ausschließlich die aktuell noch offene, sich füllende Kerze leicht ab
-  (0,8–1,3 %) — plausibel für eine unabgeschlossene Kerze zwischen zwei
-  unabhängigen Orderbooks, kein Datenfehler. Details in `NOTES.md`.
+  überlappenden Fenster, Preise stimmen bei 1h durchgehend überein. Bei 4h
+  zeigte sich anfangs eine Abweichung (0,8–1,3 %) auf der jeweils noch nicht
+  geschlossenen Kerze — behoben, indem `check_cross_source` unfertige Kerzen
+  jetzt grundsätzlich vom Vergleich ausschließt (sonst würde der Check bei
+  jedem nächtlichen Lauf auf der aktuellsten Kerze feuern, bis niemand mehr
+  hinschaut). Details und Gegenprobe in `NOTES.md`.
+- **Rollenverteilung folgt aus dem 720-Kerzen-Limit, nicht aus Geschmack:**
+  Binance ist die Quelle mit vollständiger Historie und damit die Quelle der
+  Wahrheit für den Curated Layer; Kraken bleibt strukturell auf ein
+  rollierendes Validierungsfenster begrenzt und tritt nie als gleichwertige
+  Quelle an. Löst die Rollenfrage aus der ursprünglich offenen
+  Konfliktfrage — was aber bei einer *echten* Abweichung innerhalb des
+  überlappenden Fensters passiert, ist damit noch nicht entschieden (siehe
+  unten).
+- **Krakens Fenster ist unwiederbringlich:** fällt eine Kerze aus den
+  letzten ~720 einmal heraus, ist sie über diesen Endpoint für immer weg.
+  Läuft der Ingestion-Job mehrere Wochen nicht, ist Krakens Beitrag zur
+  Cross-Validation für diesen Zeitraum dauerhaft verloren (Binance bleibt
+  unberührt). Macht Phase 4 dringlicher als ursprünglich gedacht — siehe dort.
 
-**Offene Frage für später, bewusst hier notiert statt implizit im Code
-entschieden:** Wenn sich Binance und Kraken widersprechen — welche Quelle
-gilt? Antwort für jetzt: **keine**. Der Raw Layer speichert beide Quellen
-unverändert nebeneinander; eine Entscheidung (z. B. primäre Quelle,
-Mittelwert, zuletzt-aktualisiert) fällt erst beim Aufbau des Curated Layer
-in Phase 3, nicht vorher.
+**Offene Wertfrage für später, bewusst hier notiert statt implizit im Code
+entschieden:** Widersprechen sich Binance und Kraken innerhalb des
+überlappenden Fensters tatsächlich (nicht nur formationsbedingt) — welcher
+Wert gewinnt? Antwort für jetzt: **keiner automatisch**. Der Raw Layer
+speichert beide Quellen unverändert nebeneinander, ohne Korrektur. Dass
+Binance grundsätzlich die primäre Quelle ist, steht durch die
+Rollenverteilung oben schon fest; eine echte Konflikt-Entscheidung (z. B.
+Kraken-Abweichung als Signal für "Binance-Wert genauer prüfen" statt nur
+zu loggen) fällt erst beim Aufbau des Curated Layer in Phase 3.
 
 ### Phase 3 — Curated Layer lokal
 *Ziel: Aus Rohdaten wird ein Modell, mit dem man analysieren kann.*
@@ -192,6 +210,16 @@ in Phase 3, nicht vorher.
 
 ### Phase 4 — Orchestrierung
 *Ziel: Es läuft ohne dich, und ein Fehler ist sichtbar.*
+
+**Nicht mehr nur "wäre schön" — Kraken macht das dringlich.** Krakens
+öffentlicher OHLC-Endpoint liefert strukturell nur die letzten ~720 Kerzen
+(siehe Phase 2 / `NOTES.md`); fällt eine Kerze aus diesem rollierenden
+Fenster heraus, bevor sie geladen wurde, ist sie unwiederbringlich weg. Ein
+manuell angestoßener Backfill wie in Phase 2 reicht als Dauerlösung nicht —
+ohne regelmäßigen, verlässlichen Lauf verliert die Cross-Validation
+laufend Abdeckung. Binance ist davon nicht betroffen (volle Historie
+jederzeit nachladbar), aber Krakens Nutzen als Prüfinstanz hängt direkt
+daran, dass der Ingestion-Job nicht wochenlang aussetzt.
 
 - Pipeline als DAG: Ingest → Quality → Transform → Load, mit Abbruch bei Fehler
 - Lokal mit Prefect oder schlicht Makefile + cron

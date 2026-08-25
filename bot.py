@@ -24,10 +24,33 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Strategy thresholds — named constants, not magic numbers, so a backtest
+# run can record exactly what was used (see transform/fact_backtest.py)
+# without a second, possibly-drifting copy of these values.
+# ---------------------------------------------------------------------------
+
+EMA_FAST = 20
+EMA_SLOW = 50
+RSI_PERIOD = 14
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL_PERIOD = 9
+ATR_PERIOD = 14
+VOLUME_MA_WINDOW = 20
+
+RSI_BULLISH_BAND = (40, 70)
+RSI_BEARISH_BAND = (30, 60)
+EMA20_DISTANCE_THRESHOLD = 0.03  # entry must be within +/-3% of EMA20
+
+ATR_SL_MULTIPLE = 1.5
+ATR_TP_MULTIPLE = 3.0
+
+
+# ---------------------------------------------------------------------------
 # Indicators
 # ---------------------------------------------------------------------------
 
-def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+def calculate_rsi(series: pd.Series, period: int = RSI_PERIOD) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -38,15 +61,15 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def calculate_macd(series: pd.Series):
-    ema_12 = series.ewm(span=12, adjust=False).mean()
-    ema_26 = series.ewm(span=26, adjust=False).mean()
-    macd = ema_12 - ema_26
-    signal = macd.ewm(span=9, adjust=False).mean()
+    ema_fast = series.ewm(span=MACD_FAST, adjust=False).mean()
+    ema_slow = series.ewm(span=MACD_SLOW, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=MACD_SIGNAL_PERIOD, adjust=False).mean()
     hist = macd - signal
     return macd, signal, hist
 
 
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
     high_low = df["High"] - df["Low"]
     high_close = (df["High"] - df["Close"].shift()).abs()
     low_close = (df["Low"] - df["Close"].shift()).abs()
@@ -56,12 +79,12 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
-    df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    df["RSI"] = calculate_rsi(df["Close"], period=14)
+    df["EMA_20"] = df["Close"].ewm(span=EMA_FAST, adjust=False).mean()
+    df["EMA_50"] = df["Close"].ewm(span=EMA_SLOW, adjust=False).mean()
+    df["RSI"] = calculate_rsi(df["Close"], period=RSI_PERIOD)
     df["MACD"], df["MACD_SIGNAL"], df["MACD_HIST"] = calculate_macd(df["Close"])
-    df["ATR"] = calculate_atr(df, period=14)
-    df["Volume_MA"] = df["Volume"].rolling(window=20).mean()
+    df["ATR"] = calculate_atr(df, period=ATR_PERIOD)
+    df["Volume_MA"] = df["Volume"].rolling(window=VOLUME_MA_WINDOW).mean()
     return df
 
 
@@ -110,8 +133,8 @@ def generate_entry_signal(df_1h: pd.DataFrame, higher_trend: str) -> str:
         and ema_20 > ema_50
         and price > ema_20
         and macd > macd_signal
-        and 40 < rsi < 70
-        and distance_from_ema20 < 0.03
+        and RSI_BULLISH_BAND[0] < rsi < RSI_BULLISH_BAND[1]
+        and distance_from_ema20 < EMA20_DISTANCE_THRESHOLD
         and volume > volume_ma
     )
     bearish_entry = (
@@ -119,8 +142,8 @@ def generate_entry_signal(df_1h: pd.DataFrame, higher_trend: str) -> str:
         and ema_20 < ema_50
         and price < ema_20
         and macd < macd_signal
-        and 30 < rsi < 60
-        and distance_from_ema20 > -0.03
+        and RSI_BEARISH_BAND[0] < rsi < RSI_BEARISH_BAND[1]
+        and distance_from_ema20 > -EMA20_DISTANCE_THRESHOLD
         and volume > volume_ma
     )
 
@@ -140,11 +163,11 @@ def create_trade_plan(df_1h: pd.DataFrame, signal: str) -> dict:
         return {}
 
     if signal == "BUY":
-        stop_loss = entry - (1.5 * atr)
-        take_profit = entry + (3.0 * atr)
+        stop_loss = entry - (ATR_SL_MULTIPLE * atr)
+        take_profit = entry + (ATR_TP_MULTIPLE * atr)
     elif signal == "SELL":
-        stop_loss = entry + (1.5 * atr)
-        take_profit = entry - (3.0 * atr)
+        stop_loss = entry + (ATR_SL_MULTIPLE * atr)
+        take_profit = entry - (ATR_TP_MULTIPLE * atr)
     else:
         return {}
 

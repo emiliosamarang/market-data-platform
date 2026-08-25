@@ -57,6 +57,35 @@ class RawStore:
         whether because a whole day-partition is missing or because an
         existing partition has a gap in it.
         """
+        combined = self.load_range(asset_class, source, symbol, interval, start, end)
+
+        missing_ms = self._missing_candles(combined, interval, to_ms(start), to_ms(end))
+        if missing_ms:
+            raise MissingDataError(
+                self._missing_data_message(symbol, interval, start, end, missing_ms)
+            )
+
+        return combined[OHLCV_COLUMNS]
+
+    def load_range(
+        self,
+        asset_class: str,
+        source: str,
+        symbol: str,
+        interval: str,
+        start: datetime,
+        end: datetime,
+        dedupe: bool = True,
+    ) -> pd.DataFrame:
+        """Read whatever is on disk for symbol/interval in [start, end], gaps and all.
+
+        Unlike read(), this never raises on missing candles — it's the
+        entry point for callers that need to inspect incomplete or
+        duplicate-laden data rather than treat it as an error, e.g. quality
+        checks. Pass dedupe=False to see raw partition contents including
+        any duplicate rows (read() and dedupe=True both collapse those on
+        (timestamp, source, symbol, interval), keeping the last write).
+        """
         start_ms, end_ms = to_ms(start), to_ms(end)
         if start_ms > end_ms:
             raise ValueError(f"start ({start}) is after end ({end})")
@@ -72,16 +101,22 @@ class RawStore:
             start_ts, end_ts = to_utc_timestamp(start), to_utc_timestamp(end)
             combined = combined[(combined["timestamp"] >= start_ts) & (combined["timestamp"] <= end_ts)]
 
-        combined = combined.drop_duplicates(subset=_DEDUPE_KEYS, keep="last")
+        if dedupe:
+            combined = combined.drop_duplicates(subset=_DEDUPE_KEYS, keep="last")
         combined = combined.sort_values("timestamp").reset_index(drop=True)
 
-        missing_ms = self._missing_candles(combined, interval, start_ms, end_ms)
-        if missing_ms:
-            raise MissingDataError(
-                self._missing_data_message(symbol, interval, start, end, missing_ms)
-            )
-
         return combined[OHLCV_COLUMNS]
+
+    def missing_candles(
+        self, df: pd.DataFrame, interval: str, start: datetime, end: datetime
+    ) -> list[pd.Timestamp]:
+        """Public wrapper around the grid-gap check read() uses internally.
+
+        Returns the UTC timestamps expected on the interval's grid within
+        [start, end] that aren't present in df, sorted, empty if none.
+        """
+        missing_ms = self._missing_candles(df, interval, to_ms(start), to_ms(end))
+        return [pd.Timestamp(ms, unit="ms", tz="UTC") for ms in missing_ms]
 
     def _missing_candles(
         self, combined: pd.DataFrame, interval: str, start_ms: int, end_ms: int

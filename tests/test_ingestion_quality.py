@@ -1,0 +1,373 @@
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from config import INGESTION_SYMBOLS
+from ingestion.base import OHLCV_COLUMNS
+from ingestion.quality import (
+    ERROR,
+    OUTLIER_WINDOW,
+    REPORT_COLUMNS,
+    WARNING,
+    build_parser,
+    check_duplicates,
+    check_freshness,
+    check_gaps,
+    check_ohlc_plausibility,
+    check_outliers,
+    check_zero_volume,
+    run,
+    run_checks,
+)
+from ingestion.raw_store import RawStore
+
+
+def _rows(timestamps, symbol="BTCUSDT", interval="1h", source="binance", price=100.0, volume=10.0):
+    n = len(timestamps)
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps, utc=True),
+            "open": [price] * n,
+            "high": [price * 1.01] * n,
+            "low": [price * 0.99] * n,
+            "close": [price + 1] * n,
+            "volume": [volume] * n,
+            "source": [source] * n,
+            "symbol": [symbol] * n,
+            "interval": [interval] * n,
+        }
+    )[OHLCV_COLUMNS]
+
+
+# ---------------------------------------------------------------------------
+# check_gaps
+# ---------------------------------------------------------------------------
+
+class TestCheckGaps:
+    def test_no_gap_passes(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        df = _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z", "2024-01-01T02:00:00Z"])
+
+        result = check_gaps(
+            df, store, "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        )
+
+        assert result.passed
+        assert result.severity == ERROR
+        assert result.violation_count == 0
+
+    def test_missing_hour_fails(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        df = _rows(["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"])  # 01:00 missing
+
+        result = check_gaps(
+            df, store, "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+        )
+
+        assert not result.passed
+        assert result.violation_count == 1
+        assert "2024-01-01T01:00:00" in result.details
+
+
+# ---------------------------------------------------------------------------
+# check_duplicates
+# ---------------------------------------------------------------------------
+
+class TestCheckDuplicates:
+    def test_unique_rows_pass(self):
+        df = _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"])
+
+        result = check_duplicates(df)
+
+        assert result.passed
+        assert result.severity == ERROR
+        assert result.violation_count == 0
+
+    def test_repeated_key_fails(self):
+        df = pd.concat([_rows(["2024-01-01T00:00:00Z"]), _rows(["2024-01-01T00:00:00Z"])], ignore_index=True)
+
+        result = check_duplicates(df)
+
+        assert not result.passed
+        assert result.violation_count == 2  # both copies counted
+
+
+# ---------------------------------------------------------------------------
+# check_ohlc_plausibility
+# ---------------------------------------------------------------------------
+
+class TestCheckOhlcPlausibility:
+    def test_valid_candles_pass(self):
+        df = _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"])
+
+        result = check_ohlc_plausibility(df)
+
+        assert result.passed
+        assert result.severity == ERROR
+
+    def test_high_below_low_fails(self):
+        df = _rows(["2024-01-01T00:00:00Z"])
+        df.loc[0, "high"] = 90.0
+        df.loc[0, "low"] = 100.0
+
+        result = check_ohlc_plausibility(df)
+
+        assert not result.passed
+        assert result.violation_count == 1
+
+    def test_negative_price_fails(self):
+        df = _rows(["2024-01-01T00:00:00Z"])
+        df.loc[0, "open"] = -1.0
+
+        result = check_ohlc_plausibility(df)
+
+        assert not result.passed
+
+    def test_close_outside_high_low_band_fails(self):
+        df = _rows(["2024-01-01T00:00:00Z"])
+        df.loc[0, "close"] = df.loc[0, "high"] + 10  # close above high
+
+
+        result = check_ohlc_plausibility(df)
+
+        assert not result.passed
+
+
+# ---------------------------------------------------------------------------
+# check_zero_volume
+# ---------------------------------------------------------------------------
+
+class TestCheckZeroVolume:
+    def test_nonzero_volume_passes(self):
+        df = _rows(["2024-01-01T00:00:00Z"], volume=10.0)
+
+        result = check_zero_volume(df)
+
+        assert result.passed
+        assert result.severity == WARNING
+
+    def test_zero_volume_fails_but_is_a_warning(self):
+        df = _rows(["2024-01-01T00:00:00Z"], volume=0.0)
+
+        result = check_zero_volume(df)
+
+        assert not result.passed
+        assert result.severity == WARNING
+        assert result.violation_count == 1
+
+
+# ---------------------------------------------------------------------------
+# check_freshness
+# ---------------------------------------------------------------------------
+
+class TestCheckFreshness:
+    def test_not_applicable_when_end_far_in_past(self):
+        df = _rows(["2024-01-01T00:00:00Z"])
+        end = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+        result = check_freshness(df, "1h", end)
+
+        assert result is None
+
+    def test_passes_when_last_candle_is_recent(self):
+        now = datetime.now(timezone.utc)
+        df = _rows([(now - timedelta(minutes=20)).isoformat()])
+
+        result = check_freshness(df, "1h", now)
+
+        assert result.passed
+        assert result.severity == ERROR
+
+    def test_fails_when_last_candle_is_stale(self):
+        now = datetime.now(timezone.utc)
+        df = _rows([(now - timedelta(hours=5)).isoformat()])
+
+        result = check_freshness(df, "1h", now)
+
+        assert not result.passed
+
+    def test_fails_when_no_candles_at_all(self):
+        now = datetime.now(timezone.utc)
+        df = _rows([])
+
+        result = check_freshness(df, "1h", now)
+
+        assert not result.passed
+        assert "no candles" in result.details
+
+
+# ---------------------------------------------------------------------------
+# check_outliers
+# ---------------------------------------------------------------------------
+
+def _close_series_df(closes, start="2024-01-01T00:00:00Z"):
+    timestamps = pd.date_range(start, periods=len(closes), freq="1h", tz="UTC")
+    df = _rows([ts.isoformat() for ts in timestamps])
+    df["close"] = closes
+    return df
+
+
+class TestCheckOutliers:
+    def test_calm_market_passes(self):
+        n = OUTLIER_WINDOW + 10
+        closes = [100.0]
+        for i in range(n - 1):
+            closes.append(closes[-1] * (1.002 if i % 2 == 0 else 0.998))
+        df = _close_series_df(closes)
+
+        result = check_outliers(df)
+
+        assert result.passed
+        assert result.severity == WARNING
+
+    def test_single_spike_is_flagged(self):
+        n = OUTLIER_WINDOW + 10
+        closes = [100.0]
+        for i in range(n - 1):
+            closes.append(closes[-1] * (1.002 if i % 2 == 0 else 0.998))
+        closes.append(closes[-1] * 2.0)  # +100% single-candle jump
+        df = _close_series_df(closes)
+
+        result = check_outliers(df)
+
+        assert not result.passed
+        assert result.violation_count >= 1
+
+    def test_flat_price_does_not_crash_on_zero_mad(self):
+        n = OUTLIER_WINDOW + 10
+        closes = [100.0] * n
+        df = _close_series_df(closes)
+
+        result = check_outliers(df)
+
+        assert result.passed
+        assert result.violation_count == 0
+
+    def test_too_few_rows_for_window_passes(self):
+        closes = [100.0, 100.5, 99.8]
+        df = _close_series_df(closes)
+
+        result = check_outliers(df)
+
+        assert result.passed
+        assert result.violation_count == 0
+
+
+# ---------------------------------------------------------------------------
+# run_checks / run — integration through RawStore
+# ---------------------------------------------------------------------------
+
+class TestRunChecks:
+    def test_clean_historical_data_all_pass_and_freshness_skipped(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z", "2024-01-01T02:00:00Z"]),
+            asset_class="crypto",
+        )
+
+        results = run_checks(
+            "BTCUSDT", "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            store,
+        )
+
+        assert {r.check_name for r in results} == {
+            "gaps", "duplicates", "ohlc_plausibility", "zero_volume", "outliers",
+        }
+        assert all(r.passed for r in results)
+
+    def test_gap_in_stored_data_is_detected(self, tmp_path):
+        store = RawStore(base_dir=tmp_path)
+        store.write(_rows(["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"]), asset_class="crypto")
+
+        results = run_checks(
+            "BTCUSDT", "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            store,
+        )
+
+        gaps_result = next(r for r in results if r.check_name == "gaps")
+        assert not gaps_result.passed
+
+
+class TestRun:
+    def test_writes_report_file_and_returns_zero_exit_on_clean_data(self, tmp_path):
+        store = RawStore(base_dir=tmp_path / "raw")
+        store.write(
+            _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z", "2024-01-01T02:00:00Z"]),
+            asset_class="crypto",
+        )
+        report_dir = tmp_path / "quality"
+
+        report_df, exit_code = run(
+            ["BTCUSDT"], "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            store=store, report_dir=report_dir,
+        )
+
+        assert exit_code == 0
+        assert list(report_df.columns) == REPORT_COLUMNS
+        written = list(report_dir.glob("*.parquet"))
+        assert len(written) == 1
+        assert len(pd.read_parquet(written[0])) == len(report_df)
+
+    def test_nonzero_exit_when_hard_check_fails(self, tmp_path):
+        store = RawStore(base_dir=tmp_path / "raw")
+        store.write(_rows(["2024-01-01T00:00:00Z", "2024-01-01T02:00:00Z"]), asset_class="crypto")
+
+        _, exit_code = run(
+            ["BTCUSDT"], "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 2, tzinfo=timezone.utc),
+            store=store, report_dir=tmp_path / "quality",
+        )
+
+        assert exit_code == 1
+
+    def test_soft_check_failure_does_not_set_nonzero_exit(self, tmp_path):
+        store = RawStore(base_dir=tmp_path / "raw")
+        rows = _rows(["2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z"])
+        rows.loc[0, "volume"] = 0.0  # zero_volume is WARNING-severity only
+
+        store.write(rows, asset_class="crypto")
+
+        _, exit_code = run(
+            ["BTCUSDT"], "1h",
+            datetime(2024, 1, 1, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 1, tzinfo=timezone.utc),
+            store=store, report_dir=tmp_path / "quality",
+        )
+
+        assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# CLI argument parsing
+# ---------------------------------------------------------------------------
+
+class TestArgParsing:
+    def test_default_symbols_from_config(self):
+        args = build_parser().parse_args(["--interval", "1h"])
+        assert args.symbols == INGESTION_SYMBOLS
+
+    def test_interval_is_required(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["--symbol", "BTCUSDT"])
+
+    def test_start_and_end_default_to_none(self):
+        args = build_parser().parse_args(["--interval", "1h"])
+        assert args.start is None
+        assert args.end is None
+
+    def test_start_parses_date_only_as_utc(self):
+        args = build_parser().parse_args(["--interval", "1h", "--start", "2024-01-01"])
+        assert args.start == datetime(2024, 1, 1, tzinfo=timezone.utc)

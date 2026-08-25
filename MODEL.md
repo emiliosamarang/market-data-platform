@@ -75,22 +75,31 @@ risk this avoids: `fact_indicator` showing values that don't match what
 the backtest actually simulated because two independent implementations
 drifted apart.
 
-## Build order
+## Build order — complete ✅
 
-Dependencies point downward — each step needs the previous one to exist
-and hold plausible data before starting the next:
+Dependencies point downward — each step needed the previous one to exist
+and hold plausible data before the next started. All four are built and
+verified against real data (row counts, idempotent reruns):
 
-1. **`dim_symbol`, `dim_date`, `dim_interval`, `dim_source`** — small,
+1. ✅ **`dim_symbol`, `dim_date`, `dim_interval`, `dim_source`** — small,
    static-ish, fast to get right. No dependency on anything else.
-2. **`fact_ohlcv`** — load path from the Raw Parquet layer via `RawStore`.
-   Once this holds plausible row counts (cross-checked against the Raw
-   Layer itself), the foundation is trustworthy enough to build on.
-3. **`fact_indicator`, `fact_signal`** — depend on `fact_ohlcv` (specifically
+2. ✅ **`fact_ohlcv`** — load path from the Raw Parquet layer via `RawStore`.
+   Once this held plausible row counts (cross-checked against the Raw
+   Layer itself), the foundation was trustworthy enough to build on.
+3. ✅ **`fact_indicator`, `fact_signal`** — depend on `fact_ohlcv` (specifically
    its canonical view) being loaded and correct.
-4. **`fact_backtest_run`, `fact_backtest_trade`** — last, because they
-   depend on `backtest.py` being converted from console output to writing
-   into the DB, which is its own piece of work on top of the schema
-   existing.
+4. ✅ **`fact_backtest_run`, `fact_backtest_trade`** — last, since they
+   depended on `backtest.py` writing into the DB (additively — the console
+   report is unchanged) rather than only printing to the console.
+
+`fact_quality_check` isn't in this ordered list — it's a straightforward
+load of the existing `data/quality/*.parquet` reports (see
+`ingestion/quality.py`) and can slot in whenever convenient; not built yet.
+
+**Now unblocked:** `fact_backtest_run` stores full parameters (including
+git commit hash) per run, so multiple strategy parametrizations can finally
+be run and compared against each other — recommended before Phase 5 (Azure
+migration), see `ROADMAP.md`.
 
 `fact_quality_check` isn't in this ordered list — it's a straightforward
 load of the existing `data/quality/*.parquet` reports (see

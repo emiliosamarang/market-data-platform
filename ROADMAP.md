@@ -199,18 +199,35 @@ nachvollziehbar statt beim Laden stillschweigend wegdefiniert — das ist
 auch, was an dieser Stelle von einem Data-Team erwartet wird: eine
 dokumentierte Entscheidung im Schema, keine versteckte Transformation.
 
-### Phase 3 — Curated Layer lokal
+### Phase 3 — Curated Layer lokal ✅
 *Ziel: Aus Rohdaten wird ein Modell, mit dem man analysieren kann.*
 
-- Transformationsschicht `transform/`: Raw → Indikatoren → Signale
-- Star Schema in lokaler Postgres oder DuckDB aufbauen. `fact_ohlcv` trägt
-  `dim_source` als eigene Dimension und enthält Binance- und Kraken-Zeilen
-  nebeneinander (kein Merge beim Laden); eine View/ein `is_canonical`-Flag
-  markiert obendrüber die kanonische Zeile (Binance, außer sie fehlt) — siehe
-  Wertfrage-Entscheidung in Phase 2
-- Backtest schreibt seine Läufe und Trades als Fakten in die DB statt in die Konsole
-- Historisierung: Läufe werden nie überschrieben, jeder bekommt eine ID und
-  seine Parameter mitgespeichert
+Alle vier Build-Schritte aus `MODEL.md` stehen: `dim_symbol`/`dim_date`/
+`dim_interval`/`dim_source` → `fact_ohlcv` (inkl. `fact_ohlcv_canonical`) →
+`fact_indicator`/`fact_signal` → `fact_backtest_run`/`fact_backtest_trade`.
+Jeweils gegen echte Daten geprüft (Zeilenzahlen plausibilisiert, Idempotenz
+bewiesen). Details und die dabei gefundenen Bugs (Dims-Idempotenz,
+DB-Verschmutzung durch ungemockte Tests) in `NOTES.md`.
+
+- ~~Transformationsschicht `transform/`: Raw → Indikatoren → Signale~~ ✅
+- ~~Star Schema in lokaler Postgres oder DuckDB aufbauen~~ ✅ DuckDB,
+  `fact_ohlcv` trägt `dim_source` als eigene Dimension und enthält Binance-
+  und Kraken-Zeilen nebeneinander (kein Merge beim Laden); eine View
+  (`fact_ohlcv_canonical`) markiert obendrüber die kanonische Zeile
+  (Binance, außer sie fehlt) — siehe Wertfrage-Entscheidung in Phase 2
+- ~~Backtest schreibt seine Läufe und Trades als Fakten in die DB statt nur
+  in die Konsole~~ ✅ additiv, Konsolenausgabe bleibt unverändert bestehen
+- ~~Historisierung: Läufe werden nie überschrieben, jeder bekommt eine ID
+  und seine Parameter mitgespeichert~~ ✅ inkl. Git-Commit-Hash und
+  Dirty-Flag — der Punkt, an dem aus "irgendein Ergebnis" ein
+  reproduzierbares wird
+
+**Nächster Schritt, empfohlen vor Phase 5 (Azure):** Jetzt, wo Läufe mit
+vollständigen Parametern historisiert werden, lässt sich zum ersten Mal die
+Frage angehen, ob die ursprünglichen Strategie-Schwellwerte überhaupt
+begründet sind — mehrere Parametrisierungen gegeneinander laufen lassen und
+vergleichen. Erst wissen, ob die Strategie in ihrer aktuellen Form die beste
+erreichbare ist, dann den Apparat drumherum (Azure, Power BI) bauen.
 - **Portfolio-Backtesting ("Modell B")** — bisher simuliert `backtest.py`
   jedes Symbol mit einem eigenen, unabhängigen ACCOUNT_SIZE-Sleeve
   ("Modell A", seit dem Account-Size-Fix korrekt ausgewiesen). Modell B wäre

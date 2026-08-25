@@ -221,6 +221,12 @@ laufend Abdeckung. Binance ist davon nicht betroffen (volle Historie
 jederzeit nachladbar), aber Krakens Nutzen als Prüfinstanz hängt direkt
 daran, dass der Ingestion-Job nicht wochenlang aussetzt.
 
+**Stopgap bis diese Phase steht:** `scripts/daily_load.sh` läuft täglich
+02:00 Uhr per Crontab (`0 2 * * * .../scripts/daily_load.sh`), lädt Binance
+und Kraken für beide Intervalle nach. Kein Ersatz für Phase 4 — kein
+DAG, kein Alerting bei Fehlschlag, keine Retry-Logik — nur genug, um
+Krakens Fenster bis dahin nicht verfallen zu lassen.
+
 - Pipeline als DAG: Ingest → Quality → Transform → Load, mit Abbruch bei Fehler
 - Lokal mit Prefect oder schlicht Makefile + cron
 - Runs werden protokolliert (Startzeit, Dauer, verarbeitete Zeilen, Status)

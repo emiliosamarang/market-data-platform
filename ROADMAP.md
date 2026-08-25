@@ -179,21 +179,28 @@ hätte, bevor sie zwei Stunden Debugging gekostet hat.
   Cross-Validation für diesen Zeitraum dauerhaft verloren (Binance bleibt
   unberührt). Macht Phase 4 dringlicher als ursprünglich gedacht — siehe dort.
 
-**Offene Wertfrage für später, bewusst hier notiert statt implizit im Code
-entschieden:** Widersprechen sich Binance und Kraken innerhalb des
-überlappenden Fensters tatsächlich (nicht nur formationsbedingt) — welcher
-Wert gewinnt? Antwort für jetzt: **keiner automatisch**. Der Raw Layer
-speichert beide Quellen unverändert nebeneinander, ohne Korrektur. Dass
-Binance grundsätzlich die primäre Quelle ist, steht durch die
-Rollenverteilung oben schon fest; eine echte Konflikt-Entscheidung (z. B.
-Kraken-Abweichung als Signal für "Binance-Wert genauer prüfen" statt nur
-zu loggen) fällt erst beim Aufbau des Curated Layer in Phase 3.
+**Wertfrage — Mechanismus jetzt entschieden, Bau folgt erst in Phase 3:**
+Widersprechen sich Binance und Kraken innerhalb des überlappenden Fensters
+tatsächlich (nicht nur formationsbedingt) — welcher Wert gewinnt? Im Raw
+Layer weiterhin keiner automatisch; beide Quellen bleiben unverändert
+nebeneinander stehen. Für `fact_ohlcv` im Curated Layer (Phase 3) ist die
+Antwort aber bereits festgelegt, damit sie nicht beim Bauen nebenbei
+entschieden wird: **beide Quellen als eigene Zeilen mit `source`-Spalte**,
+darüber eine View/ein Flag, das die kanonische Zeile markiert (Binance,
+außer sie fehlt). Der Widerspruch bleibt damit im Modell sichtbar und
+nachvollziehbar statt beim Laden stillschweigend wegdefiniert — das ist
+auch, was an dieser Stelle von einem Data-Team erwartet wird: eine
+dokumentierte Entscheidung im Schema, keine versteckte Transformation.
 
 ### Phase 3 — Curated Layer lokal
 *Ziel: Aus Rohdaten wird ein Modell, mit dem man analysieren kann.*
 
 - Transformationsschicht `transform/`: Raw → Indikatoren → Signale
-- Star Schema in lokaler Postgres oder DuckDB aufbauen
+- Star Schema in lokaler Postgres oder DuckDB aufbauen. `fact_ohlcv` trägt
+  `dim_source` als eigene Dimension und enthält Binance- und Kraken-Zeilen
+  nebeneinander (kein Merge beim Laden); eine View/ein `is_canonical`-Flag
+  markiert obendrüber die kanonische Zeile (Binance, außer sie fehlt) — siehe
+  Wertfrage-Entscheidung in Phase 2
 - Backtest schreibt seine Läufe und Trades als Fakten in die DB statt in die Konsole
 - Historisierung: Läufe werden nie überschrieben, jeder bekommt eine ID und
   seine Parameter mitgespeichert

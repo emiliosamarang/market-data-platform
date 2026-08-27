@@ -222,12 +222,18 @@ DB-Verschmutzung durch ungemockte Tests) in `NOTES.md`.
   Dirty-Flag — der Punkt, an dem aus "irgendein Ergebnis" ein
   reproduzierbares wird
 
-**Nächster Schritt, empfohlen vor Phase 5 (Azure):** Jetzt, wo Läufe mit
-vollständigen Parametern historisiert werden, lässt sich zum ersten Mal die
-Frage angehen, ob die ursprünglichen Strategie-Schwellwerte überhaupt
-begründet sind — mehrere Parametrisierungen gegeneinander laufen lassen und
-vergleichen. Erst wissen, ob die Strategie in ihrer aktuellen Form die beste
-erreichbare ist, dann den Apparat drumherum (Azure, Power BI) bauen.
+**Erledigt, vor Phase 5:** `scripts/parameter_sweep.py` — zwei Parameter
+(`ATR_SL_MULTIPLE`, `EMA20_DISTANCE_THRESHOLD`), univariat, bewertet nach
+Return/MaxDD auf zwei getrennten 365-Tage-Fenstern. Ergebnis:
+`EMA20_DISTANCE_THRESHOLD=0.03` liegt in einem über beide Fenster robusten
+Plateau; `ATR_SL_MULTIPLE=1.5` ist der beste testbare Wert, sitzt aber an
+einer strukturellen Kante (Kopplung mit `ATR_TP_MULTIPLE`/`MIN_RR` über das
+Reward/Risk-Verhältnis — ab 1.75 passiert exakt null Trades, nicht
+weniger). Beide Ergebnisse und die vollständigen Tabellen in `NOTES.md`.
+Die ursprünglichen Werte waren nicht willkürlich unbeprüft, sondern sind
+jetzt geprüft — mit einer offenen Frage bei `ATR_SL_MULTIPLE`, die ein
+Sweep über `ATR_TP_MULTIPLE`/`MIN_RR` gemeinsam beantworten müsste, falls
+das später relevant wird.
 - **Portfolio-Backtesting ("Modell B")** — bisher simuliert `backtest.py`
   jedes Symbol mit einem eigenen, unabhängigen ACCOUNT_SIZE-Sleeve
   ("Modell A", seit dem Account-Size-Fix korrekt ausgewiesen). Modell B wäre

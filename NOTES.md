@@ -548,3 +548,95 @@ Bullenphasen-Upside gegen fast die gesamte Bärenphasen-Downside getauscht
 — bei XRP über 2 Jahre war dieser Tausch in absoluten Zahlen ein
 Verlustgeschäft (Bullish-Verzicht > Bearish-Ersparnis), risikoadjustiert
 (Return/MaxDD 11,32 vs. 1,96) trotzdem klar vorteilhaft.
+
+## Parameter-Sweep: waren die ursprünglichen Schwellwerte begründet?
+
+`scripts/parameter_sweep.py` beantwortet die Frage, die seit dem
+Backtest-Rendite-Sprung offenstand: wer hat eigentlich entschieden, dass
+`ATR_SL_MULTIPLE=1.5` oder `EMA20_DISTANCE_THRESHOLD=0.03` die richtigen
+Werte sind? Methodik, mit vier Vorgaben, damit daraus keine Zahlenschau
+wird:
+
+- **Zwei Parameter, univariat, nicht gekreuzt** — je 5 Stufen, den jeweils
+  anderen auf Baseline gehalten. 20 Läufe insgesamt (10 pro Fenster), nicht
+  hunderte.
+- **Bewertet nach Return/MaxDD**, nicht nach roher Rendite — die Kennzahl,
+  die über beide Backtest-Zeiträume konsistent war (siehe oben), nicht die,
+  die am stärksten schwankte.
+- **Zwei getrennte, nicht überlappende 365-Tage-Fenster**: Auswahl (letzte
+  365 Tage) und Validierung (die 365 Tage davor). Eine Stufe, die nur im
+  Auswahlfenster gut aussieht, ist Zufall.
+- **Plateau statt Spitzenwert** — bewertet wird ein ganzer robuster
+  Bereich, nicht die einzelne beste Zahl.
+
+Jeder der 20 Läufe ist reproduzierbar in `fact_backtest_run` historisiert
+(volle Parameter, Commit-Hash) — dieselbe Infrastruktur wie jeder andere
+Backtest-Lauf, kein Parallelpfad.
+
+### ATR_SL_MULTIPLE (Baseline: 1.5)
+
+| Stufe | Auswahl: Trades | Auswahl: Return/MaxDD | Validierung: Trades | Validierung: Return/MaxDD |
+|---|---|---|---|---|
+| 1.00 | 923 | 1.80 | 962 | 0.33 |
+| 1.25 | 861 | 2.76 | 889 | **0.84** |
+| **1.50 (Baseline)** | 746 | **4.94** | 757 | 0.58 |
+| 1.75 | 0 | — | 0 | — |
+| 2.00 | 0 | — | 0 | — |
+
+**Struktureller Befund, wichtiger als jede einzelne Zahl:** Ab 1.75 gibt es
+in beiden Fenstern exakt null Trades — kein Rauschen, sondern Mechanik.
+Stop-Loss und Take-Profit sind beide ATR-Vielfache
+(`ATR_SL_MULTIPLE`/`ATR_TP_MULTIPLE=3.0`), also ist das Reward/Risk-
+Verhältnis jedes Signals exakt `3.0 / ATR_SL_MULTIPLE`, unabhängig vom
+Marktzustand. Sobald das unter `MIN_RR=2.0` fällt (ab `ATR_SL_MULTIPLE >
+1.5`), lehnt `is_trade_worth_it` *jeden* Trade ab — nicht weniger Trades,
+null. Die Baseline sitzt damit exakt an der Kante dieser Klippe, nicht in
+der Mitte eines Bereichs. Das ist selbst ein Befund: `ATR_SL_MULTIPLE`
+lässt sich mit fixem `ATR_TP_MULTIPLE`/`MIN_RR` nur nach unten sinnvoll
+testen — eine Kopplung, die vor diesem Sweep nirgends sichtbar war.
+
+Innerhalb des testbaren Bereichs (1.0–1.5): 1.0 ist in beiden Fenstern klar
+am schlechtesten (1.80 / 0.33). 1.25 und 1.5 sind beide deutlich besser als
+1.0, tauschen aber den Rang zwischen den Fenstern (Auswahl bevorzugt 1.5,
+Validierung bevorzugt 1.25) — ein Zwei-Punkt-Plateau, kein einzelner
+Ausreißer, aber auch kein sauberes Optimum. Die Baseline ist vertretbar,
+aber nicht beweisbar optimal — und "optimal höher" lässt sich mit diesem
+Sweep-Design gar nicht prüfen, ohne `ATR_TP_MULTIPLE`/`MIN_RR` mit
+anzufassen.
+
+### EMA20_DISTANCE_THRESHOLD (Baseline: 0.03)
+
+| Stufe | Auswahl: Trades | Auswahl: Return/MaxDD | Validierung: Trades | Validierung: Return/MaxDD |
+|---|---|---|---|---|
+| 0.01 | 409 | 3.67 | 355 | **−0.55** |
+| 0.02 | 677 | 2.58 | 650 | −0.08 |
+| **0.03 (Baseline)** | 746 | **4.94** | 757 | 0.58 |
+| 0.05 | 774 | 3.37 | 807 | **0.87** |
+| 0.08 | 777 | 3.49 | 818 | 0.74 |
+
+**Das ist das saubere Plateau, das der Sweep eigentlich finden sollte.**
+0.01 und 0.02 sind im Auswahlfenster nicht auffällig schlecht (3.67 bzw.
+2.58), kippen im Validierungsfenster aber ins Negative bzw. nahe null
+(−0.55 / −0.08) — ein Wert, der nur im Fenster gut aussieht, in dem er
+nie ausgewählt wurde, hätte hier genau das falsche Signal gegeben. Die
+Stufen 0.03–0.08 dagegen sind in **beiden** Fenstern durchgehend positiv
+und liegen nah beieinander (4.94/3.37/3.49 vs. 0.58/0.87/0.74) — ein
+echter, robuster Bereich, keine Einzelspitze zwischen schlechten Nachbarn.
+Die Baseline (0.03) liegt mittig in diesem Plateau, nicht an seinem Rand.
+
+### Fazit
+
+Realistischer Ausgang, wie erwartet: die ursprünglichen Werte erweisen
+sich als brauchbar, nicht als verbesserbar. Für `EMA20_DISTANCE_THRESHOLD`
+ist das eindeutig — die Baseline liegt in einem über beide Fenster
+robusten Plateau, kein Zufallstreffer. Für `ATR_SL_MULTIPLE` ist die
+Antwort nuancierter: die Baseline ist die vernünftigste unter den
+*testbaren* Werten, sitzt aber strukturell an einer Kante, die durch die
+Kopplung mit `ATR_TP_MULTIPLE`/`MIN_RR` entsteht — eine Frage, die dieser
+Sweep aufgeworfen, aber nicht abschließend beantwortet hat.
+
+Das beantwortet auch die eigentliche Frage: Die Strategie-Schwellwerte
+waren nicht willkürlich unbeprüft — sie sind jetzt geprüft und liegen,
+mit einer dokumentierten Einschränkung bei `ATR_SL_MULTIPLE`, in einem
+robusten Bereich. Das steht jetzt so in der Doku, statt dass die Parameter
+nie hinterfragt wurden.

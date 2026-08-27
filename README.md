@@ -157,6 +157,19 @@ A univariate parameter sweep (`scripts/parameter_sweep.py`) checked two of them 
 
 This is exactly why the current priority is the `ingestion/` raw-data layer and its data-quality/reporting correctness rather than further strategy tuning: without a fixed, reproducible historical dataset and a backtest that accounts for capital correctly, no result from this strategy — good or bad — is trustworthy enough to act on yet. The parameter sweep above is a first, narrow slice of walk-forward validation (two parameters, two windows) — not the proper multi-window validation this conclusion is still waiting on.
 
+### Does the signal add anything beyond the stop-loss mechanics?
+
+Every backtest so far had one comparison point (buy-and-hold) that isn't structurally similar to the strategy at all — it never trades, has no stop-loss, no fee-per-trade. `strategies/` adds a proper apples-to-apples baseline: a `Strategy` interface (mirroring `ingestion.base.MarketDataSource`) behind which `EmaRsiMacdStrategy` wraps the existing `bot.py` logic unchanged, and `RandomStrategy` uses the *same* ATR-based stop-loss/take-profit as the real strategy (via `bot.create_trade_plan`) and the *same* number of trades per symbol per window — but picks entry side and timing at random, with no trend filter and no reward:risk gate. If the strategy's edge were really just "wide-enough stops relative to volatility," random entries with the same stops should perform similarly.
+
+They don't. `scripts/random_baseline.py` ran the real strategy once per window (to fix each symbol's target trade count) and `RandomStrategy` across 30 independent seeds per window, on the same two 365-day windows the parameter sweep used:
+
+| Window | Real strategy Return/MaxDD | Random median | Random range (30 seeds) |
+|---|---|---|---|
+| Selection (recent 365d) | **4.94** | −0.90 | [−1.00, −0.52] |
+| Validation (prior 365d) | **0.58** | −0.90 | [−1.00, −0.35] |
+
+The real strategy beats **every single one** of the 60 random draws across both windows — not just the median, the best-case random seed too. A single random draw is noise (the same reason the parameter sweep needed two windows, not one run), so this is a distribution, not a coin flip: the real strategy's Return/MaxDD sits entirely outside the random range in both windows. Since the stop-loss mechanics are identical between the two, the gap is attributable to *when* and *which direction* the strategy enters — the entry signal itself is doing real work, not just the risk management wrapped around it. Full per-window trade counts and methodology: `NOTES.md`.
+
 ## Roadmap
 
 - **Backfill** — proactively bulk-load full symbol/interval history through `ingestion/` (rather than relying on ad-hoc `--refresh` calls) so the raw layer is complete before any backtest run

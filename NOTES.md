@@ -640,3 +640,83 @@ waren nicht willkürlich unbeprüft — sie sind jetzt geprüft und liegen,
 mit einer dokumentierten Einschränkung bei `ATR_SL_MULTIPLE`, in einem
 robusten Bereich. Das steht jetzt so in der Doku, statt dass die Parameter
 nie hinterfragt wurden.
+
+## Strategy-Interface und Random-Baseline: trägt das Signal etwas bei?
+
+Ausgangsfrage: Buy & Hold ist der einzige Vergleichspunkt, den es bisher
+gab, und strukturell mit der Strategie nicht vergleichbar — kein Trade,
+kein Stop-Loss, keine Gebühr pro Round-Trip. Damit ließ sich nie sauber
+beantworten, ob der Vorteil der Strategie (siehe Return/MaxDD oben) aus dem
+*Signal* kommt oder einfach nur daraus, dass überhaupt ein ATR-basierter
+Stop-Loss existiert.
+
+**Dafür zwei neue Bausteine:**
+
+- `strategies/base.py` — ein `Strategy`-Interface (`decide()`/optional
+  `prepare()`), nach demselben Muster wie `ingestion.base.MarketDataSource`.
+  `backtest.run_backtest()` kennt jetzt nur noch das Interface, nicht mehr
+  die konkrete Signal-Logik — Default-Verhalten unverändert (verifiziert
+  über die volle bestehende Testsuite plus neue Wiring-Tests).
+- `strategies/ema_rsi_macd.py` — `EmaRsiMacdStrategy`, ein reiner Wrapper
+  um die unveränderte `bot.py`-Logik (`get_trend_4h`,
+  `generate_entry_signal`, `create_trade_plan`, `is_trade_worth_it`) —
+  keine Neuimplementierung, exakt dasselbe Verhalten wie vor dem Refactor.
+- `strategies/random_strategy.py` — `RandomStrategy`: **derselbe**
+  ATR-basierte Stop (`bot.create_trade_plan`), **dieselbe** Trade-Anzahl
+  pro Symbol und Fenster wie die echte Strategie in diesem Lauf, aber
+  zufälliger Einstiegszeitpunkt und zufällige Seite — bewusst **kein**
+  Trend-Filter, **kein** RR-Gate. Der Vergleich isoliert damit gezielt:
+  gleiche Stop-Mechanik, andere Einstiegslogik.
+
+**Methodik (`scripts/random_baseline.py`), dieselben zwei Fenster wie beim
+Parameter-Sweep:**
+
+- Pro Fenster läuft zuerst die echte Strategie einmal durch — ihre
+  Trade-Anzahl pro Symbol wird zum Ziel für `RandomStrategy` in genau
+  diesem Fenster.
+- Danach 30 unabhängige Zufalls-Seeds pro Fenster (nicht ein einzelner
+  Zufalls-Lauf) — aus demselben Grund, aus dem der Parameter-Sweep zwei
+  Fenster brauchte: ein einzelner Zufalls-Draw ist selbst Rauschen.
+  Bewertet wird die **Verteilung** (Median, Min–Max), nicht eine Zahl.
+- Bewertet nach Return/MaxDD, dieselbe Kennzahl wie beim Parameter-Sweep.
+- Jeder Lauf landet in `fact_backtest_run` (`strategy_name='ema_rsi_macd'`
+  bzw. `'random'`) — für die 60 Zufallsläufe bewusst nur die
+  Lauf-Zusammenfassung, keine `fact_backtest_trade`-Zeilen (das wären
+  60 × mehrere hundert Trades, die niemand einzeln abfragt).
+
+### Ergebnis
+
+| Fenster | Trades (Ziel) | Strategie Return/MaxDD | Random Median | Random Min–Max (30 Seeds) |
+|---|---|---|---|---|
+| Auswahl (letzte 365 Tage) | 746 | **4.94** | −0.90 | [−1.00, −0.52] |
+| Validierung (365 Tage davor) | 757 | **0.58** | −0.90 | [−1.00, −0.35] |
+
+Trade-Ziele pro Symbol — Auswahl: `{BTC: 158, ETH: 145, SOL: 141, XRP: 157,
+ADA: 145}`; Validierung: `{BTC: 172, ETH: 132, SOL: 162, XRP: 153, ADA:
+138}`.
+
+**Die echte Strategie schlägt in beiden Fenstern jeden einzelnen der 30
+Zufallsläufe** — nicht nur den Median, auch das beste Zufallsergebnis
+(Auswahl: 4.94 vs. bester Random-Wert −0.52; Validierung: 0.58 vs. bester
+Random-Wert −0.35). Die Zufallsverteilung selbst ist über beide Fenster
+konsistent negativ (Median −0.90 in beiden), mit derselben Stop-Mechanik
+wie die echte Strategie — reines Timing/Seite ohne Trend-Filter verliert
+verlässlich Geld, selbst mit ATR-Stop. Da Stop-Loss/Take-Profit-Mechanik
+zwischen echter und Zufalls-Strategie identisch sind, lässt sich der
+gesamte Unterschied nur auf *wann* und *in welche Richtung* eingestiegen
+wird zurückführen — das Signal selbst trägt real etwas bei, es ist nicht
+nur der Stop-Loss, der die Zahlen oben trägt.
+
+**Einordnung:** Auffällig ist, dass der Random-Median in beiden Fenstern
+fast identisch ausfällt (−0.90 beide Male) — plausibel, weil die
+Stop-Mechanik (ATR-basiert, `MIN_RR` faktisch irrelevant, da
+`RandomStrategy` kein RR-Gate hat) unabhängig vom Marktregime ähnlich
+wirkt, während zufälliges Timing im Mittel keinen Trend ausnutzt. Das
+bestätigt indirekt den Befund von oben: die Strategie gewinnt nicht, weil
+"irgendein" Stop reicht, sondern weil Trend-Filter und RR-Gate tatsächlich
+selektieren, welche Trades überhaupt stattfinden.
+
+Ein SMA-Crossover oder eine zweite echte Strategiefamilie als weiterer
+Vergleichspunkt ist damit vorerst zurückgestellt — der Random-Baseline hat
+die eigentlich offene Frage ("bringt das Signal etwas?") bereits klar
+beantwortet.

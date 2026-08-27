@@ -234,6 +234,18 @@ Die ursprünglichen Werte waren nicht willkürlich unbeprüft, sondern sind
 jetzt geprüft — mit einer offenen Frage bei `ATR_SL_MULTIPLE`, die ein
 Sweep über `ATR_TP_MULTIPLE`/`MIN_RR` gemeinsam beantworten müsste, falls
 das später relevant wird.
+
+**Erledigt:** `strategies/` — ein `Strategy`-Interface (`decide()`/`prepare()`,
+analog zu `MarketDataSource`), dahinter `EmaRsiMacdStrategy` als reiner
+Wrapper um die bestehende `bot.py`-Logik (keine Neuimplementierung) und
+`RandomStrategy` als Vergleichspunkt: gleicher ATR-Stop wie die echte
+Strategie, gleiche Trade-Anzahl pro Symbol, aber zufälliger Einstieg statt
+Signal — kein Trend-Filter, kein RR-Gate. `scripts/random_baseline.py`
+fährt 30 Zufalls-Seeds über beide Sweep-Fenster und vergleicht die
+Return/MaxDD-Verteilung gegen die echte Strategie. Ergebnis: die echte
+Strategie schlägt **jeden einzelnen** der 60 Zufallsläufe in beiden
+Fenstern — das Signal trägt selbst etwas bei, es ist nicht nur das
+Stop-Loss-Management. Details und Tabellen in `NOTES.md`.
 - **Portfolio-Backtesting ("Modell B")** — bisher simuliert `backtest.py`
   jedes Symbol mit einem eigenen, unabhängigen ACCOUNT_SIZE-Sleeve
   ("Modell A", seit dem Account-Size-Fix korrekt ausgewiesen). Modell B wäre

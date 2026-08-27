@@ -6,6 +6,7 @@ import config
 from strategies.base import Strategy
 from strategies.ema_rsi_macd import EmaRsiMacdStrategy
 from strategies.random_strategy import RandomStrategy
+from strategies.sma_crossover import SmaCrossoverStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +223,77 @@ class TestRandomStrategy:
         strategy.prepare("BTCUSDT", pd.DataFrame(), df_1h)
         strategy._triggers = {0}  # force the NaN-ATR row to be the trigger
         assert strategy.decide(pd.DataFrame(), df_1h.iloc[:1]) is None
+
+
+# ---------------------------------------------------------------------------
+# SmaCrossoverStrategy — the "simplest non-random rule" reference point
+# ---------------------------------------------------------------------------
+
+def _closes_1h(closes, atr=2.0):
+    n = len(closes)
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    return pd.DataFrame(
+        {
+            "Open": closes, "High": [c * 1.01 for c in closes], "Low": [c * 0.99 for c in closes], "Close": closes,
+            "Volume": [1000.0] * n,
+            "EMA_20": closes, "EMA_50": closes, "RSI": [50.0] * n,
+            "MACD": [0.0] * n, "MACD_SIGNAL": [0.0] * n, "MACD_HIST": [0.0] * n,
+            "ATR": [atr] * n, "Volume_MA": [1000.0] * n,
+        },
+        index=idx,
+    )
+
+
+class TestSmaCrossoverStrategy:
+    def test_name(self):
+        assert SmaCrossoverStrategy().name == "sma_crossover"
+
+    def test_returns_none_below_sma_period_plus_one_rows(self):
+        strategy = SmaCrossoverStrategy()
+        df_1h = _closes_1h([100.0] * strategy.SMA_PERIOD)  # exactly SMA_PERIOD, one short
+        assert strategy.decide(pd.DataFrame(), df_1h) is None
+
+    def test_returns_none_on_flat_price_no_cross(self):
+        strategy = SmaCrossoverStrategy()
+        df_1h = _closes_1h([100.0] * (strategy.SMA_PERIOD + 2))
+        assert strategy.decide(pd.DataFrame(), df_1h) is None
+
+    def test_buy_on_upward_cross_matches_bot_create_trade_plan(self):
+        strategy = SmaCrossoverStrategy()
+        closes = [100.0] * strategy.SMA_PERIOD + [95.0, 110.0]
+        df_1h = _closes_1h(closes, atr=2.0)
+
+        decision = strategy.decide(pd.DataFrame(), df_1h)
+
+        assert decision is not None
+        assert decision["side"] == "BUY"
+        expected_plan = bot.create_trade_plan(df_1h, "BUY")
+        assert decision["stop_loss"] == pytest.approx(expected_plan["stop_loss"])
+        assert decision["take_profit"] == pytest.approx(expected_plan["take_profit"])
+
+    def test_sell_on_downward_cross_matches_bot_create_trade_plan(self):
+        strategy = SmaCrossoverStrategy()
+        closes = [100.0] * strategy.SMA_PERIOD + [105.0, 90.0]
+        df_1h = _closes_1h(closes, atr=2.0)
+
+        decision = strategy.decide(pd.DataFrame(), df_1h)
+
+        assert decision is not None
+        assert decision["side"] == "SELL"
+        expected_plan = bot.create_trade_plan(df_1h, "SELL")
+        assert decision["stop_loss"] == pytest.approx(expected_plan["stop_loss"])
+        assert decision["take_profit"] == pytest.approx(expected_plan["take_profit"])
+
+    def test_returns_none_when_atr_is_nan(self):
+        strategy = SmaCrossoverStrategy()
+        closes = [100.0] * strategy.SMA_PERIOD + [95.0, 110.0]  # would otherwise be a BUY cross
+        df_1h = _closes_1h(closes, atr=float("nan"))
+        assert strategy.decide(pd.DataFrame(), df_1h) is None
+
+    def test_no_trend_filter_or_rr_gate(self):
+        # A poor RR ratio (huge ATR) must not block a real cross — SMA
+        # crossover, like RandomStrategy, deliberately has no RR gate.
+        strategy = SmaCrossoverStrategy()
+        closes = [100.0] * strategy.SMA_PERIOD + [95.0, 110.0]
+        df_1h = _closes_1h(closes, atr=50.0)
+        assert strategy.decide(pd.DataFrame(), df_1h) is not None

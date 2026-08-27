@@ -1,6 +1,6 @@
-"""Random baseline: does the real strategy's signal timing add anything
-beyond its own stop-loss/take-profit risk management, or is the whole edge
-just the ATR-based stop mechanics?
+"""Reference-strategy baselines: two lower bars for the real strategy to
+clear, on both sides of "no real signal at all" vs. "the simplest possible
+non-random rule".
 
 Usage:
     python -m scripts.random_baseline
@@ -16,7 +16,19 @@ Methodology (results and interpretation: NOTES.md):
 - RandomStrategy uses bot.create_trade_plan for stop-loss/take-profit (same
   mechanics as the real strategy) but has no trend filter and no
   is_trade_worth_it gate — entries are pure random side/timing draws. See
-  strategies/random_strategy.py.
+  strategies/random_strategy.py. IMPORTANT SCOPING NOTE: it removes both
+  the trend filter and the RR gate *simultaneously* — a result here shows
+  whether that combination (plus the underlying EMA/RSI/MACD confluence in
+  generate_entry_signal) adds value over having neither, not which single
+  piece of it is doing the work. Attributing the gap to "the trend filter"
+  specifically would be a claim this design can't support.
+- SmaCrossoverStrategy is the other reference point: not "no entry logic"
+  but "the simplest non-random entry logic" — a single moving-average
+  cross, same ATR-based stop, no trend filter, no RR gate, no trade-count
+  matching (it trades on its own natural frequency). See
+  strategies/sma_crossover.py. This tests whether EmaRsiMacdStrategy's
+  extra complexity earns its keep against the cheapest alternative that
+  isn't just noise.
 - One random seed is one draw, and a single draw is itself noise — the same
   reason the parameter sweep needed two separate windows, not one. Run
   N_SEEDS=30 independent draws per window and report the distribution
@@ -30,11 +42,13 @@ Methodology (results and interpretation: NOTES.md):
   RandomStrategy.prepare, since it takes a single scalar seed). Still fully
   deterministic given the outer seed.
 - Every run is persisted into fact_backtest_run with strategy_name
-  ("ema_rsi_macd" for the reference run, "random" for each seed) via the
-  same record_backtest_run used everywhere else — but random runs are
-  run-level summaries only, not individual trades: fact_backtest_trade
-  would otherwise gain 30 seeds x 2 windows x per-symbol-trades rows of
-  data nobody queries individually.
+  ("ema_rsi_macd" / "sma_crossover" for the two deterministic reference
+  runs, "random" for each of the 30 seeds) via the same record_backtest_run
+  used everywhere else. Random runs are run-level summaries only, not
+  individual trades: fact_backtest_trade would otherwise gain 30 seeds x 2
+  windows x per-symbol-trades rows of data nobody queries individually. The
+  two deterministic runs (real strategy, SMA crossover) do get their trades
+  recorded, same as any other single backtest run.
 """
 import logging
 import statistics
@@ -45,6 +59,7 @@ from config import ACCOUNT_SIZE, CURATED_DB_PATH, RAW_DATA_DIR, SYMBOLS, setup_l
 from ingestion.raw_store import RawStore
 from strategies.ema_rsi_macd import EmaRsiMacdStrategy
 from strategies.random_strategy import RandomStrategy
+from strategies.sma_crossover import SmaCrossoverStrategy
 from transform.db import connect
 from transform.dims import populate_all_dims
 from transform.fact_backtest import record_backtest_run, record_backtest_trades
@@ -93,16 +108,31 @@ def _run_random_seed(universe: dict, target_trades: dict[str, int], seed: int) -
     return all_trades
 
 
-def _log_distribution(window_label: str, real_result: dict, random_results: list[dict]) -> None:
+def _run_strategy_once(universe: dict, strategy_factory) -> list[dict]:
+    """A deterministic strategy (no per-run randomness), run across the
+    whole universe on its own natural trade frequency — no target-trades
+    matching, unlike RandomStrategy. Used for SmaCrossoverStrategy."""
+    all_trades = []
+    for symbol, (df_4h, df_1h) in universe.items():
+        all_trades.extend(run_backtest(symbol, df_4h, df_1h, strategy_factory()))
+    return all_trades
+
+
+def _log_distribution(window_label: str, real_result: dict, sma_result: dict, random_results: list[dict]) -> None:
     returns = [r["return_pct"] for r in random_results]
     drawdowns = [r["max_drawdown_pct"] for r in random_results]
     ratios = [r["return_to_dd_ratio"] for r in random_results]
 
-    log.info("--- %s: real strategy vs. %d random-seed draws ---", window_label, len(random_results))
+    log.info("--- %s: real strategy vs. SMA crossover vs. %d random-seed draws ---", window_label, len(random_results))
     log.info(
-        "  Real strategy      — trades=%-4d return=%+7.1f%%  maxDD=%6.1f%%  Return/MaxDD=%7.2f",
+        "  Real strategy       — trades=%-4d return=%+7.1f%%  maxDD=%6.1f%%  Return/MaxDD=%7.2f",
         real_result["trades_count"], real_result["return_pct"],
         real_result["max_drawdown_pct"], real_result["return_to_dd_ratio"],
+    )
+    log.info(
+        "  SMA crossover       — trades=%-4d return=%+7.1f%%  maxDD=%6.1f%%  Return/MaxDD=%7.2f",
+        sma_result["trades_count"], sma_result["return_pct"],
+        sma_result["max_drawdown_pct"], sma_result["return_to_dd_ratio"],
     )
     log.info(
         "  Random (median)     — return=%+7.1f%%  maxDD=%6.1f%%  Return/MaxDD=%7.2f",
@@ -132,6 +162,14 @@ def run_window(window_label: str, symbols: list[str], start: datetime, end: date
     record_backtest_trades(conn, real_run_id, real_trades)
     log.info("  target trade counts per symbol: %s", target_trades)
 
+    sma_trades = _run_strategy_once(universe, SmaCrossoverStrategy)
+    sma_result = log_report(f"{window_label} — SMA crossover baseline", sma_trades, account)
+    sma_run_id = record_backtest_run(
+        conn, symbols, days, start, end, "1h", "4h", FEE_RATE, WARMUP,
+        sma_result, _NO_BH_METRICS, strategy_name="sma_crossover",
+    )
+    record_backtest_trades(conn, sma_run_id, sma_trades)
+
     random_results = []
     for seed in range(N_SEEDS):
         random_trades = _run_random_seed(universe, target_trades, seed)
@@ -142,9 +180,9 @@ def run_window(window_label: str, symbols: list[str], start: datetime, end: date
         )
         random_results.append(result)
 
-    _log_distribution(window_label, real_result, random_results)
+    _log_distribution(window_label, real_result, sma_result, random_results)
 
-    return {"real": real_result, "random": random_results}
+    return {"real": real_result, "sma": sma_result, "random": random_results}
 
 
 def main() -> None:
@@ -166,9 +204,11 @@ def main() -> None:
         conn.close()
 
     log.info("=" * 70)
+    n_random = len(selection["random"]) + len(validation["random"])
     log.info(
-        "Random baseline complete. %d runs recorded into fact_backtest_run (2 real + %d random).",
-        2 + len(selection["random"]) + len(validation["random"]), len(selection["random"]) + len(validation["random"]),
+        "Reference-strategy baselines complete. %d runs recorded into fact_backtest_run "
+        "(2 real + 2 SMA crossover + %d random).",
+        4 + n_random, n_random,
     )
 
 

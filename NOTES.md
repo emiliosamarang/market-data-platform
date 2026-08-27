@@ -641,7 +641,7 @@ mit einer dokumentierten Einschränkung bei `ATR_SL_MULTIPLE`, in einem
 robusten Bereich. Das steht jetzt so in der Doku, statt dass die Parameter
 nie hinterfragt wurden.
 
-## Strategy-Interface und Random-Baseline: trägt das Signal etwas bei?
+## Strategy-Interface und Referenz-Strategien: wo steht die Strategie wirklich?
 
 Ausgangsfrage: Buy & Hold ist der einzige Vergleichspunkt, den es bisher
 gab, und strukturell mit der Strategie nicht vergleichbar — kein Trade,
@@ -650,7 +650,7 @@ beantworten, ob der Vorteil der Strategie (siehe Return/MaxDD oben) aus dem
 *Signal* kommt oder einfach nur daraus, dass überhaupt ein ATR-basierter
 Stop-Loss existiert.
 
-**Dafür zwei neue Bausteine:**
+**Dafür drei neue Bausteine:**
 
 - `strategies/base.py` — ein `Strategy`-Interface (`decide()`/optional
   `prepare()`), nach demselben Muster wie `ingestion.base.MarketDataSource`.
@@ -665,8 +665,17 @@ Stop-Loss existiert.
   ATR-basierte Stop (`bot.create_trade_plan`), **dieselbe** Trade-Anzahl
   pro Symbol und Fenster wie die echte Strategie in diesem Lauf, aber
   zufälliger Einstiegszeitpunkt und zufällige Seite — bewusst **kein**
-  Trend-Filter, **kein** RR-Gate. Der Vergleich isoliert damit gezielt:
-  gleiche Stop-Mechanik, andere Einstiegslogik.
+  Trend-Filter, **kein** RR-Gate. Die Nulllinie nach unten: schlägt die
+  Strategie das nicht, ist da kein Signal, nur Rauschen mit Stop-Loss.
+- `strategies/sma_crossover.py` — `SmaCrossoverStrategy`: die einfachste
+  Regel, die *kein* Zufall ist — ein einzelner gleitender Durchschnitt
+  (SMA, Periode 50), Einstieg beim Cross des Preises über/unter die
+  Linie. **Derselbe** ATR-Stop wie die anderen beiden, aber eigene,
+  natürliche Trade-Frequenz (kein Trade-Count-Matching) — bewusst
+  ebenfalls **kein** Trend-Filter, **kein** RR-Gate. Der interessante
+  Referenzpunkt: wenn eine simple Regel ähnlich gut abschneidet wie die
+  dreiteilige Konstruktion aus Trend-Filter, RR-Gate und
+  EMA/RSI/MACD-Konfluenz, ist die Zusatzkomplexität nicht gerechtfertigt.
 
 **Methodik (`scripts/random_baseline.py`), dieselben zwei Fenster wie beim
 Parameter-Sweep:**
@@ -680,43 +689,65 @@ Parameter-Sweep:**
   Bewertet wird die **Verteilung** (Median, Min–Max), nicht eine Zahl.
 - Bewertet nach Return/MaxDD, dieselbe Kennzahl wie beim Parameter-Sweep.
 - Jeder Lauf landet in `fact_backtest_run` (`strategy_name='ema_rsi_macd'`
-  bzw. `'random'`) — für die 60 Zufallsläufe bewusst nur die
-  Lauf-Zusammenfassung, keine `fact_backtest_trade`-Zeilen (das wären
-  60 × mehrere hundert Trades, die niemand einzeln abfragt).
+  / `'sma_crossover'` / `'random'`) — für die 60 Zufallsläufe bewusst nur
+  die Lauf-Zusammenfassung, keine `fact_backtest_trade`-Zeilen (das wären
+  60 × mehrere hundert Trades, die niemand einzeln abfragt). Die beiden
+  deterministischen Läufe (echte Strategie, SMA-Crossover) bekommen ihre
+  Trades wie jeder normale Backtest-Lauf mitgespeichert.
 
 ### Ergebnis
 
-| Fenster | Trades (Ziel) | Strategie Return/MaxDD | Random Median | Random Min–Max (30 Seeds) |
+| Fenster | Strategie Return/MaxDD | SMA-Crossover Return/MaxDD | Random Median | Random Min–Max (30 Seeds) |
 |---|---|---|---|---|
-| Auswahl (letzte 365 Tage) | 746 | **4.94** | −0.90 | [−1.00, −0.52] |
-| Validierung (365 Tage davor) | 757 | **0.58** | −0.90 | [−1.00, −0.35] |
+| Auswahl (letzte 365 Tage) | **4.94** (746 Trades) | −0.95 (1086 Trades) | −0.90 | [−1.00, −0.05] |
+| Validierung (365 Tage davor) | **0.58** (757 Trades) | −0.92 (1116 Trades) | −0.89 | [−1.00, −0.57] |
 
-Trade-Ziele pro Symbol — Auswahl: `{BTC: 158, ETH: 145, SOL: 141, XRP: 157,
-ADA: 145}`; Validierung: `{BTC: 172, ETH: 132, SOL: 162, XRP: 153, ADA:
-138}`.
+Trade-Ziele pro Symbol (echte Strategie, Basis für die Random-Trade-Anzahl)
+— Auswahl: `{BTC: 158, ETH: 145, SOL: 141, XRP: 157, ADA: 145}`;
+Validierung: `{BTC: 172, ETH: 132, SOL: 162, XRP: 153, ADA: 138}`.
+`SmaCrossoverStrategy` läuft dagegen auf eigener, natürlicher Frequenz
+(kein Matching) — entsprechend fast doppelt so viele Trades wie die echte
+Strategie.
 
 **Die echte Strategie schlägt in beiden Fenstern jeden einzelnen der 30
 Zufallsläufe** — nicht nur den Median, auch das beste Zufallsergebnis
-(Auswahl: 4.94 vs. bester Random-Wert −0.52; Validierung: 0.58 vs. bester
-Random-Wert −0.35). Die Zufallsverteilung selbst ist über beide Fenster
-konsistent negativ (Median −0.90 in beiden), mit derselben Stop-Mechanik
-wie die echte Strategie — reines Timing/Seite ohne Trend-Filter verliert
-verlässlich Geld, selbst mit ATR-Stop. Da Stop-Loss/Take-Profit-Mechanik
-zwischen echter und Zufalls-Strategie identisch sind, lässt sich der
-gesamte Unterschied nur auf *wann* und *in welche Richtung* eingestiegen
-wird zurückführen — das Signal selbst trägt real etwas bei, es ist nicht
-nur der Stop-Loss, der die Zahlen oben trägt.
+(Auswahl: 4.94 vs. bester Random-Wert −0.05; Validierung: 0.58 vs. bester
+Random-Wert −0.57). Da Stop-Loss/Take-Profit-Mechanik zwischen echter und
+Zufalls-Strategie identisch sind, lässt sich der Unterschied auf die
+Entscheidungslogik zurückführen, die die Strategie zusätzlich zur
+Stop-Mechanik mitbringt — nicht auf den Stop-Loss allein.
 
-**Einordnung:** Auffällig ist, dass der Random-Median in beiden Fenstern
-fast identisch ausfällt (−0.90 beide Male) — plausibel, weil die
-Stop-Mechanik (ATR-basiert, `MIN_RR` faktisch irrelevant, da
-`RandomStrategy` kein RR-Gate hat) unabhängig vom Marktregime ähnlich
-wirkt, während zufälliges Timing im Mittel keinen Trend ausnutzt. Das
-bestätigt indirekt den Befund von oben: die Strategie gewinnt nicht, weil
-"irgendein" Stop reicht, sondern weil Trend-Filter und RR-Gate tatsächlich
-selektieren, welche Trades überhaupt stattfinden.
+**Wichtige Einschränkung, bevor daraus mehr gelesen wird, als der Test
+hergibt:** `RandomStrategy` lässt Trend-Filter und RR-Gate gleichzeitig
+weg, nicht einzeln. Der Test zeigt, dass diese Kombination (Trend-Filter +
+RR-Gate + die EMA/RSI/MACD-Konfluenz aus `generate_entry_signal`)
+gegenüber "gar keiner Filterung" etwas beiträgt — er zeigt **nicht**,
+welcher einzelne Bestandteil davon trägt. "Der Trend-Filter funktioniert"
+wäre eine Aussage, die dieser Aufbau nicht stützt; dafür müsste man
+Trend-Filter und RR-Gate getrennt voneinander herausnehmen, nicht beide
+gleichzeitig.
 
-Ein SMA-Crossover oder eine zweite echte Strategiefamilie als weiterer
-Vergleichspunkt ist damit vorerst zurückgestellt — der Random-Baseline hat
-die eigentlich offene Frage ("bringt das Signal etwas?") bereits klar
-beantwortet.
+**Der eigentlich interessante Befund kommt vom SMA-Crossover:** Er
+schneidet in beiden Fenstern nicht nur schlechter ab als die echte
+Strategie, sondern **schlechter als der Random-Median** (Auswahl: −0.95
+vs. −0.90; Validierung: −0.92 vs. −0.89) — trotz desselben ATR-Stops wie
+die echte Strategie und trotz fast doppelt so vieler Trades. Eine simple
+Regel ("Preis kreuzt einen gleitenden Durchschnitt") ist hier *nicht*
+näherungsweise so gut wie die dreiteilige Konstruktion aus Trend-Filter,
+RR-Gate und EMA/RSI/MACD-Konfluenz — sie ist nicht einmal so gut wie
+Zufall mit demselben Stop. Das ist ein stärkerer Beleg für die
+Zusatzkomplexität als der Random-Vergleich allein: die Strategie schlägt
+nicht nur "kein Signal", sie schlägt auch "ein einfacheres, aber
+plausibel klingendes Signal" deutlich. Warum der SMA-Crossover so
+schlecht abschneidet, ist eine eigene Frage (denkbar: verspätete
+Cross-Signale in trendlosen/volatilen Phasen erzeugen viele
+Fehlsignale — die höhere Trade-Zahl bei niedrigerem Return/MaxDD deutet
+in diese Richtung) und nicht Teil dieser Untersuchung.
+
+Damit gibt es jetzt drei Referenzpunkte statt einem: Buy & Hold (obere
+Nulllinie — kein Trading, kein Stop-Loss, mit anderem Risikoprofil, siehe
+oben), `RandomStrategy` (untere Nulllinie — derselbe Stop, kein Signal)
+und `SmaCrossoverStrategy` (die einfachste nicht-zufällige Regel). Die
+Strategie liegt in beiden Fenstern klar über allen dreien, nicht nur über
+dem naheliegendsten Vergleich. Eine zweite echte Strategiefamilie über
+die SMA-Crossover-Baseline hinaus ist damit vorerst zurückgestellt.

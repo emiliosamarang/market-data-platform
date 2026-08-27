@@ -157,18 +157,24 @@ A univariate parameter sweep (`scripts/parameter_sweep.py`) checked two of them 
 
 This is exactly why the current priority is the `ingestion/` raw-data layer and its data-quality/reporting correctness rather than further strategy tuning: without a fixed, reproducible historical dataset and a backtest that accounts for capital correctly, no result from this strategy — good or bad — is trustworthy enough to act on yet. The parameter sweep above is a first, narrow slice of walk-forward validation (two parameters, two windows) — not the proper multi-window validation this conclusion is still waiting on.
 
-### Does the signal add anything beyond the stop-loss mechanics?
+### Three reference points, not just buy-and-hold
 
-Every backtest so far had one comparison point (buy-and-hold) that isn't structurally similar to the strategy at all — it never trades, has no stop-loss, no fee-per-trade. `strategies/` adds a proper apples-to-apples baseline: a `Strategy` interface (mirroring `ingestion.base.MarketDataSource`) behind which `EmaRsiMacdStrategy` wraps the existing `bot.py` logic unchanged, and `RandomStrategy` uses the *same* ATR-based stop-loss/take-profit as the real strategy (via `bot.create_trade_plan`) and the *same* number of trades per symbol per window — but picks entry side and timing at random, with no trend filter and no reward:risk gate. If the strategy's edge were really just "wide-enough stops relative to volatility," random entries with the same stops should perform similarly.
+Every backtest so far had one comparison point (buy-and-hold) that isn't structurally similar to the strategy at all — it never trades, has no stop-loss, no fee-per-trade. `strategies/` adds two proper apples-to-apples baselines behind a shared `Strategy` interface (mirroring `ingestion.base.MarketDataSource`): `EmaRsiMacdStrategy` wraps the existing `bot.py` logic unchanged; `RandomStrategy` uses the *same* ATR-based stop-loss/take-profit (via `bot.create_trade_plan`) and the *same* number of trades per symbol per window as the real strategy, but picks entry side and timing at random, with no trend filter and no reward:risk gate — the floor. `SmaCrossoverStrategy` uses the same ATR stop again, but enters on the simplest non-random rule there is: price crossing a single 50-period moving average, no trend filter, no RR gate, on its own natural trade frequency — the "is the added complexity even worth it" reference.
 
-They don't. `scripts/random_baseline.py` ran the real strategy once per window (to fix each symbol's target trade count) and `RandomStrategy` across 30 independent seeds per window, on the same two 365-day windows the parameter sweep used:
+`scripts/random_baseline.py` ran the real strategy and the SMA crossover once per window (deterministic), and `RandomStrategy` across 30 independent seeds per window, on the same two 365-day windows the parameter sweep used:
 
-| Window | Real strategy Return/MaxDD | Random median | Random range (30 seeds) |
-|---|---|---|---|
-| Selection (recent 365d) | **4.94** | −0.90 | [−1.00, −0.52] |
-| Validation (prior 365d) | **0.58** | −0.90 | [−1.00, −0.35] |
+| Window | Real strategy Return/MaxDD | SMA crossover Return/MaxDD | Random median | Random range (30 seeds) |
+|---|---|---|---|---|
+| Selection (recent 365d) | **4.94** (746 trades) | −0.95 (1086 trades) | −0.90 | [−1.00, −0.05] |
+| Validation (prior 365d) | **0.58** (757 trades) | −0.92 (1116 trades) | −0.89 | [−1.00, −0.57] |
 
-The real strategy beats **every single one** of the 60 random draws across both windows — not just the median, the best-case random seed too. A single random draw is noise (the same reason the parameter sweep needed two windows, not one run), so this is a distribution, not a coin flip: the real strategy's Return/MaxDD sits entirely outside the random range in both windows. Since the stop-loss mechanics are identical between the two, the gap is attributable to *when* and *which direction* the strategy enters — the entry signal itself is doing real work, not just the risk management wrapped around it. Full per-window trade counts and methodology: `NOTES.md`.
+The real strategy beats **every single one** of the 60 random draws across both windows — not just the median, the best-case random seed too. Since the stop-loss mechanics are identical between the two, the gap is attributable to the decision logic the strategy adds on top of the stop, not the stop-loss alone.
+
+**Scoping that precisely, since it's easy to overstate:** `RandomStrategy` removes the trend filter and the RR gate *simultaneously*, not one at a time. This result shows that combination (trend filter + RR gate + the EMA/RSI/MACD confluence in `generate_entry_signal`) adds value over no filtering at all — it does **not** show which individual piece is doing the work. "The trend filter works" is a claim this design can't support; that would need the two removed independently, not together.
+
+**The more informative result is the SMA crossover**, which sits *below* the random median in both windows (Selection: −0.95 vs. −0.90; Validation: −0.92 vs. −0.89) despite the same stop and nearly double the trade count. A simple, plausible-sounding rule isn't a cheaper substitute for the strategy's three-part entry logic here — it's not even competitive with picking entries at random. That's a stronger justification for the added complexity than the random comparison alone: the strategy isn't just beating "no signal," it's clearly beating "a simpler signal" too.
+
+Full per-window trade counts, per-symbol targets, and methodology: `NOTES.md`.
 
 ## Roadmap
 

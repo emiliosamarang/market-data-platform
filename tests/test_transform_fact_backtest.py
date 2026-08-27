@@ -98,6 +98,23 @@ class TestRecordBacktestRun:
         ).fetchone()
         assert row == (EMA_FAST, EMA_SLOW, RSI_BULLISH_BAND[0], ATR_SL_MULTIPLE, ATR_TP_MULTIPLE)
 
+    def test_reflects_a_monkeypatched_threshold_not_the_stale_import(self, monkeypatch):
+        # Regression: reading via `from bot import ATR_SL_MULTIPLE` binds
+        # once at import time and would still show the original value here
+        # even though the run actually used 2.75 — exactly what a
+        # parameter sweep needs to not misrecord.
+        import bot
+        monkeypatch.setattr(bot, "ATR_SL_MULTIPLE", 2.75)
+        conn = _conn()
+        start, end = datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, tzinfo=timezone.utc)
+
+        run_id = record_backtest_run(
+            conn, ["BTCUSDT"], 150, start, end, "1h", "4h", 0.001, 100, _STRATEGY_METRICS, _BH_METRICS,
+        )
+
+        stored = conn.execute("SELECT atr_sl_multiple FROM fact_backtest_run WHERE run_id = ?", [run_id]).fetchone()[0]
+        assert stored == 2.75
+
     def test_stores_strategy_and_benchmark_metrics_side_by_side(self):
         conn = _conn()
         start, end = datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, tzinfo=timezone.utc)

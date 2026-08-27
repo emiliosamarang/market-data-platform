@@ -14,12 +14,8 @@ from datetime import datetime, timezone
 import duckdb
 import pandas as pd
 
-from bot import (
-    ATR_PERIOD, ATR_SL_MULTIPLE, ATR_TP_MULTIPLE, EMA20_DISTANCE_THRESHOLD,
-    EMA_FAST, EMA_SLOW, MACD_FAST, MACD_SIGNAL_PERIOD, MACD_SLOW,
-    RSI_BEARISH_BAND, RSI_BULLISH_BAND, RSI_PERIOD, VOLUME_MA_WINDOW,
-)
-from config import ACCOUNT_SIZE, MIN_RR, RISK_PER_TRADE
+import bot
+import config
 
 log = logging.getLogger("transform.fact_backtest")
 
@@ -57,7 +53,14 @@ def record_backtest_run(
     strategy_metrics: dict,
     bh_metrics: dict,
 ) -> str:
-    """Insert one row into fact_backtest_run. Returns the new run_id."""
+    """Insert one row into fact_backtest_run. Returns the new run_id.
+
+    Reads bot.* / config.* constants through the module object, not via a
+    top-level `from bot import X` — those bind once at import time and go
+    stale the moment anything (e.g. a parameter sweep) monkeypatches
+    bot.ATR_SL_MULTIPLE for a run. Reading through the module reflects
+    whatever value was actually in effect for *this* run.
+    """
     run_id = uuid.uuid4().hex
     commit_hash, is_dirty = _git_info()
 
@@ -72,26 +75,26 @@ def record_backtest_run(
         "end_ts": end,
         "interval_lower": interval_lower,
         "interval_higher": interval_higher,
-        "account_size": ACCOUNT_SIZE,
+        "account_size": config.ACCOUNT_SIZE,
         "fee_rate": fee_rate,
-        "risk_per_trade": RISK_PER_TRADE,
-        "min_rr": MIN_RR,
+        "risk_per_trade": config.RISK_PER_TRADE,
+        "min_rr": config.MIN_RR,
         "warmup": warmup,
-        "ema_fast": EMA_FAST,
-        "ema_slow": EMA_SLOW,
-        "rsi_period": RSI_PERIOD,
-        "rsi_bullish_low": RSI_BULLISH_BAND[0],
-        "rsi_bullish_high": RSI_BULLISH_BAND[1],
-        "rsi_bearish_low": RSI_BEARISH_BAND[0],
-        "rsi_bearish_high": RSI_BEARISH_BAND[1],
-        "macd_fast": MACD_FAST,
-        "macd_slow": MACD_SLOW,
-        "macd_signal_period": MACD_SIGNAL_PERIOD,
-        "atr_period": ATR_PERIOD,
-        "atr_sl_multiple": ATR_SL_MULTIPLE,
-        "atr_tp_multiple": ATR_TP_MULTIPLE,
-        "ema20_distance_threshold": EMA20_DISTANCE_THRESHOLD,
-        "volume_ma_window": VOLUME_MA_WINDOW,
+        "ema_fast": bot.EMA_FAST,
+        "ema_slow": bot.EMA_SLOW,
+        "rsi_period": bot.RSI_PERIOD,
+        "rsi_bullish_low": bot.RSI_BULLISH_BAND[0],
+        "rsi_bullish_high": bot.RSI_BULLISH_BAND[1],
+        "rsi_bearish_low": bot.RSI_BEARISH_BAND[0],
+        "rsi_bearish_high": bot.RSI_BEARISH_BAND[1],
+        "macd_fast": bot.MACD_FAST,
+        "macd_slow": bot.MACD_SLOW,
+        "macd_signal_period": bot.MACD_SIGNAL_PERIOD,
+        "atr_period": bot.ATR_PERIOD,
+        "atr_sl_multiple": bot.ATR_SL_MULTIPLE,
+        "atr_tp_multiple": bot.ATR_TP_MULTIPLE,
+        "ema20_distance_threshold": bot.EMA20_DISTANCE_THRESHOLD,
+        "volume_ma_window": bot.VOLUME_MA_WINDOW,
         "trades_count": strategy_metrics.get("trades_count"),
         "win_rate_pct": strategy_metrics.get("win_rate_pct"),
         "profit_factor": strategy_metrics.get("profit_factor"),

@@ -22,6 +22,7 @@ from bot import add_indicators, get_trend_4h
 from config import ACCOUNT_SIZE
 from ingestion.base import OHLCV_COLUMNS
 from ingestion.raw_store import MissingDataError
+from strategies.ema_rsi_macd import EmaRsiMacdStrategy
 from transform.schema import create_schema
 
 
@@ -126,6 +127,116 @@ class TestLoadHistory:
 
 
 # ---------------------------------------------------------------------------
+# run_backtest — strategy wiring
+# ---------------------------------------------------------------------------
+
+def _flat_1h_for_backtest(n, spike_index=None, spike_high=None):
+    """Long-enough, indicator-friendly 1h OHLCV frame (bot.py column names,
+    i.e. the shape run_backtest expects after load_history/to_ohlc_frame).
+    `spike_index`'s High can be bumped to guarantee a take-profit hit on a
+    specific candle, so a trade closes deterministically within the test."""
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    high = [101.0] * n
+    if spike_index is not None:
+        high[spike_index] = spike_high
+    return pd.DataFrame(
+        {"Open": [100.0] * n, "High": high, "Low": [99.0] * n, "Close": [100.0] * n, "Volume": [1000.0] * n},
+        index=idx,
+    )
+
+
+class _StubStrategy:
+    """Records prepare()/decide() calls; fires exactly once, at
+    trigger_index (matched against the loop's own index, since
+    len(df_1h_slice) - 1 == the loop variable i by construction)."""
+
+    name = "stub"
+
+    def __init__(self, trigger_index, side="BUY", stop_loss=90.0, take_profit=110.0):
+        self.trigger_index = trigger_index
+        self.side = side
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.prepare_calls = []
+        self.decide_calls = []
+
+    def prepare(self, symbol, df_4h, df_1h):
+        self.prepare_calls.append((symbol, len(df_4h), len(df_1h)))
+
+    def decide(self, df_4h_slice, df_1h_slice):
+        idx = len(df_1h_slice) - 1
+        self.decide_calls.append(idx)
+        if idx != self.trigger_index:
+            return None
+        return {"side": self.side, "stop_loss": self.stop_loss, "take_profit": self.take_profit}
+
+
+class TestRunBacktestStrategyWiring:
+    def test_prepare_called_once_with_indicator_enriched_frames(self):
+        from backtest import run_backtest
+
+        df_1h = _flat_1h_for_backtest(120)
+        df_4h = _flat_1h_for_backtest(20)
+        strategy = _StubStrategy(trigger_index=10_000)  # never fires
+
+        run_backtest("BTCUSDT", df_4h, df_1h, strategy)
+
+        assert strategy.prepare_calls == [("BTCUSDT", len(df_4h), len(df_1h))]
+
+    def test_decide_called_once_per_candle_with_growing_slices(self):
+        from backtest import WARMUP, run_backtest
+
+        df_1h = _flat_1h_for_backtest(120)
+        df_4h = _flat_1h_for_backtest(20)
+        strategy = _StubStrategy(trigger_index=10_000)
+
+        run_backtest("BTCUSDT", df_4h, df_1h, strategy)
+
+        assert strategy.decide_calls == list(range(WARMUP, len(df_1h) - 1))
+
+    def test_decision_dict_becomes_a_trade_with_matching_side_and_stops(self):
+        from backtest import WARMUP, run_backtest
+
+        trigger = WARMUP + 5
+        # +6 High on the candle right after entry guarantees a TP hit there,
+        # so the trade closes within this same synthetic window.
+        df_1h = _flat_1h_for_backtest(trigger + 20, spike_index=trigger + 1, spike_high=115.0)
+        df_4h = _flat_1h_for_backtest(20)
+        strategy = _StubStrategy(trigger_index=trigger, side="BUY", stop_loss=90.0, take_profit=110.0)
+
+        trades = run_backtest("BTCUSDT", df_4h, df_1h, strategy)
+
+        assert len(trades) == 1
+        trade = trades[0]
+        assert trade["side"] == "BUY"
+        assert trade["sl"] == pytest.approx(90.0)
+        assert trade["tp"] == pytest.approx(110.0)
+        assert trade["exit_reason"] == "TP"
+        assert trade["entry"] == pytest.approx(df_1h.iloc[trigger + 1]["Open"])
+
+    def test_no_strategy_argument_defaults_to_ema_rsi_macd_strategy(self, monkeypatch):
+        from strategies.ema_rsi_macd import EmaRsiMacdStrategy
+
+        instances = []
+
+        class _TrackedDefault(EmaRsiMacdStrategy):
+            def __init__(self):
+                super().__init__()
+                instances.append(self)
+
+        monkeypatch.setattr("backtest.EmaRsiMacdStrategy", _TrackedDefault)
+
+        from backtest import run_backtest
+
+        df_1h = _flat_1h_for_backtest(120)
+        df_4h = _flat_1h_for_backtest(20)
+        run_backtest("BTCUSDT", df_4h, df_1h)
+
+        assert len(instances) == 1
+        assert isinstance(instances[0], EmaRsiMacdStrategy)
+
+
+# ---------------------------------------------------------------------------
 # main()
 # ---------------------------------------------------------------------------
 
@@ -165,7 +276,10 @@ class TestMain:
         assert ("ETHUSDT", "4h") in processed
         assert ("ETHUSDT", "1h") in processed
         assert not any(symbol == "BTCUSDT" for symbol, _ in processed)
-        run_backtest_mock.assert_called_once_with("ETHUSDT", "df", "df")
+        run_backtest_mock.assert_called_once()
+        call_args = run_backtest_mock.call_args
+        assert call_args.args[:3] == ("ETHUSDT", "df", "df")
+        assert isinstance(call_args.args[3], EmaRsiMacdStrategy)
         assert result == 1
 
     def test_no_combined_report_for_single_symbol(self, monkeypatch):

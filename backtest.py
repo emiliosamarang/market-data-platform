@@ -28,9 +28,6 @@ import pandas as pd
 from bot import (
     add_indicators,
     get_trend_4h,
-    generate_entry_signal,
-    create_trade_plan,
-    is_trade_worth_it,
     calculate_position_size,
 )
 from config import (
@@ -41,6 +38,8 @@ from config import (
 from ingestion.base import MarketDataSource, to_ohlc_frame
 from ingestion.binance_source import BinanceSource
 from ingestion.raw_store import MissingDataError, RawStore
+from strategies.base import Strategy
+from strategies.ema_rsi_macd import EmaRsiMacdStrategy
 from transform.db import connect as connect_curated_db
 from transform.dims import populate_all_dims
 from transform.fact_backtest import record_backtest_run, record_backtest_trades
@@ -89,9 +88,11 @@ def load_history(
 # Simulation
 # ---------------------------------------------------------------------------
 
-def run_backtest(symbol: str, df_4h, df_1h) -> list[dict]:
+def run_backtest(symbol: str, df_4h, df_1h, strategy: Strategy | None = None) -> list[dict]:
+    strategy = strategy if strategy is not None else EmaRsiMacdStrategy()
     df_4h = add_indicators(df_4h)
     df_1h = add_indicators(df_1h)
+    strategy.prepare(symbol, df_4h, df_1h)
 
     trades = []
     open_trade = None
@@ -143,34 +144,26 @@ def run_backtest(symbol: str, df_4h, df_1h) -> list[dict]:
 
         # ---- Look for new signal ----
         df_4h_slice = df_4h[df_4h.index <= current_time]
-        if len(df_4h_slice) < 50:
-            continue
-
         df_1h_slice = df_1h.iloc[: i + 1]
-        higher_trend = get_trend_4h(df_4h_slice)
-        signal = generate_entry_signal(df_1h_slice, higher_trend)
 
-        if signal not in ("BUY", "SELL"):
-            continue
-
-        trade_plan = create_trade_plan(df_1h_slice, signal)
-        if not is_trade_worth_it(trade_plan):
+        decision = strategy.decide(df_4h_slice, df_1h_slice)
+        if decision is None:
             continue
 
         # Enter at next candle's open — avoids lookahead bias on entry price
         next_open = df_1h.iloc[i + 1]["Open"]
         size = calculate_position_size(
-            ACCOUNT_SIZE, RISK_PER_TRADE, next_open, trade_plan["stop_loss"]
+            ACCOUNT_SIZE, RISK_PER_TRADE, next_open, decision["stop_loss"]
         )
         if size <= 0:
             continue
 
         open_trade = {
             "symbol": symbol,
-            "side": signal,
+            "side": decision["side"],
             "entry": next_open,
-            "sl": trade_plan["stop_loss"],
-            "tp": trade_plan["take_profit"],
+            "sl": decision["stop_loss"],
+            "tp": decision["take_profit"],
             "size": size,
             "entry_time": df_1h.index[i + 1],
             "exit_price": None,
@@ -495,7 +488,7 @@ def _build_run_metrics(strategy_result: dict, bh_result: dict) -> tuple[dict, di
     return strategy_metrics, bh_metrics
 
 
-def main(symbols: list[str], days: int, refresh: bool, conn=None) -> int:
+def main(symbols: list[str], days: int, refresh: bool, conn=None, strategy: Strategy | None = None) -> int:
     """Run the backtest for each symbol. Returns a process exit code.
 
     0 if every requested symbol produced a result, 1 if any symbol had to
@@ -506,8 +499,12 @@ def main(symbols: list[str], days: int, refresh: bool, conn=None) -> int:
     (fact_backtest_run/fact_backtest_trade) alongside the console report,
     not instead of it — see transform/fact_backtest.py. Pass `conn` to
     reuse an existing DuckDB connection (e.g. in tests); otherwise one is
-    opened against CURATED_DB_PATH and closed before returning.
+    opened against CURATED_DB_PATH and closed before returning. Pass
+    `strategy` to backtest something other than the default EmaRsiMacdStrategy
+    (e.g. scripts/random_baseline.py); its .name is what gets recorded as
+    fact_backtest_run.strategy_name.
     """
+    strategy = strategy if strategy is not None else EmaRsiMacdStrategy()
     all_trades: list[dict] = []
     skipped: list[tuple[str, str]] = []
     bh_results: list[dict] = []
@@ -531,7 +528,7 @@ def main(symbols: list[str], days: int, refresh: bool, conn=None) -> int:
             skipped.append((symbol, str(exc)))
             continue
 
-        trades = run_backtest(symbol, df_4h, df_1h)
+        trades = run_backtest(symbol, df_4h, df_1h, strategy)
         bh = compute_buy_and_hold(df_1h, ACCOUNT_SIZE)
         bh["symbol"] = symbol
         bh["phase_returns"] = compute_phase_returns_buy_and_hold(df_1h, df_4h, ACCOUNT_SIZE)
@@ -574,7 +571,7 @@ def main(symbols: list[str], days: int, refresh: bool, conn=None) -> int:
             strategy_metrics, bh_metrics = _build_run_metrics(final_strategy, final_bh)
             run_id = record_backtest_run(
                 conn, symbols, days, run_start, end, "1h", "4h", FEE_RATE, WARMUP,
-                strategy_metrics, bh_metrics,
+                strategy_metrics, bh_metrics, strategy_name=strategy.name,
             )
             record_backtest_trades(conn, run_id, all_trades)
         finally:

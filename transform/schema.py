@@ -110,6 +110,14 @@ CREATE TABLE IF NOT EXISTS fact_signal (
 CREATE TABLE IF NOT EXISTS fact_backtest_run (
     run_id VARCHAR PRIMARY KEY,
     run_ts TIMESTAMPTZ NOT NULL,
+    -- Which Strategy implementation produced this run (see strategies/).
+    -- The ema_fast/rsi_period/... columns below are still stamped with
+    -- bot.py's current constants regardless of strategy_name (they're
+    -- real values, not fabricated), but only meaningfully *used* by the
+    -- decision logic when strategy_name == "ema_rsi_macd" — a query
+    -- comparing strategies should filter/group on this column, not assume
+    -- every column applies to every row.
+    strategy_name VARCHAR NOT NULL DEFAULT 'ema_rsi_macd',
     commit_hash VARCHAR,      -- NULL if git wasn't available — the run is still recorded, just not reproducible
     is_dirty BOOLEAN,         -- true if the working tree had uncommitted changes at run time
     symbols VARCHAR[] NOT NULL,
@@ -185,3 +193,12 @@ CREATE TABLE IF NOT EXISTS fact_backtest_trade (
 
 def create_schema(conn) -> None:
     conn.execute(SCHEMA_DDL)
+    # Migration for databases created before strategy_name existed: the
+    # CREATE TABLE above only applies to brand-new tables, so an already
+    # populated fact_backtest_run needs this explicitly. Idempotent and
+    # backfilling, same as CREATE TABLE IF NOT EXISTS above — existing rows
+    # get the default rather than losing their history.
+    conn.execute(
+        "ALTER TABLE fact_backtest_run ADD COLUMN IF NOT EXISTS "
+        "strategy_name VARCHAR DEFAULT 'ema_rsi_macd'"
+    )

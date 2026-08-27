@@ -129,6 +129,29 @@ class TestRecordBacktestRun:
         ).fetchone()
         assert row == (12.3, -5.0, 4.5, 30.0)
 
+    def test_strategy_name_defaults_to_ema_rsi_macd(self):
+        conn = _conn()
+        start, end = datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, tzinfo=timezone.utc)
+
+        run_id = record_backtest_run(
+            conn, ["BTCUSDT"], 150, start, end, "1h", "4h", 0.001, 100, _STRATEGY_METRICS, _BH_METRICS,
+        )
+
+        stored = conn.execute("SELECT strategy_name FROM fact_backtest_run WHERE run_id = ?", [run_id]).fetchone()[0]
+        assert stored == "ema_rsi_macd"
+
+    def test_strategy_name_can_be_overridden(self):
+        conn = _conn()
+        start, end = datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, tzinfo=timezone.utc)
+
+        run_id = record_backtest_run(
+            conn, ["BTCUSDT"], 150, start, end, "1h", "4h", 0.001, 100, _STRATEGY_METRICS, _BH_METRICS,
+            strategy_name="random",
+        )
+
+        stored = conn.execute("SELECT strategy_name FROM fact_backtest_run WHERE run_id = ?", [run_id]).fetchone()[0]
+        assert stored == "random"
+
     def test_records_git_commit_hash_and_dirty_flag(self):
         conn = _conn()
         start, end = datetime(2024, 1, 1, tzinfo=timezone.utc), datetime(2024, 6, 1, tzinfo=timezone.utc)

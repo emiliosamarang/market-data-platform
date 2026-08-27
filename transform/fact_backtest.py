@@ -52,6 +52,7 @@ def record_backtest_run(
     warmup: int,
     strategy_metrics: dict,
     bh_metrics: dict,
+    strategy_name: str = "ema_rsi_macd",
 ) -> str:
     """Insert one row into fact_backtest_run. Returns the new run_id.
 
@@ -67,6 +68,7 @@ def record_backtest_run(
     row = pd.DataFrame([{
         "run_id": run_id,
         "run_ts": datetime.now(timezone.utc),
+        "strategy_name": strategy_name,
         "commit_hash": commit_hash,
         "is_dirty": is_dirty,
         "symbols": list(symbols),
@@ -112,8 +114,12 @@ def record_backtest_run(
         "bh_neutral_phase_return_pct": bh_metrics.get("neutral_phase_return_pct"),
     }])
 
+    columns = list(row.columns)
     conn.register("_backtest_run_batch", row)
-    conn.execute("INSERT INTO fact_backtest_run SELECT * FROM _backtest_run_batch")
+    conn.execute(
+        f"INSERT INTO fact_backtest_run ({', '.join(columns)}) "
+        f"SELECT {', '.join(columns)} FROM _backtest_run_batch"
+    )
     conn.unregister("_backtest_run_batch")
 
     log.info(
